@@ -83,7 +83,10 @@ Follow these steps carefully to get everything working:
 
 ## 🎮 How to Use
 
-1. Run 'main.py' python file
+1. Run :
+```bash
+  python main.py
+   ```
 6. Type your command when prompted
 7. Confirm you want to proceed
 8. Watch the agent work its magic!
