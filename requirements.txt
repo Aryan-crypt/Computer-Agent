@@ -1,0 +1,19 @@
+# PC Control AI Agent - Requirements
+# Install with: pip install -r requirements.txt
+
+# Core Automation Libraries
+pyautogui
+keyboard
+mouse
+pywin32
+
+# Image Processing and OCR
+Pillow
+pytesseract
+# NOTE: pytesseract requires the Tesseract OCR engine to be installed on your system.
+# For Windows, download and install from: https://github.com/UB-Mannheim/tesseract/wiki
+
+# AI Model Clients
+google-generativeai
+gradio-client
+requests
