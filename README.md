@@ -53,14 +53,24 @@ Follow these steps carefully to get everything working:
 ### Step 3: Download the Project
 
 1. Open Command Prompt
-2. Run 'git clone https://github.com/Aryan-crypt/Computer-Agent.git'
-3. Run 'cd Computer-Agent'
-4. Run 'pip install -r requirements.txt'
+2. Run :
+```bash
+  git clone https://github.com/Aryan-crypt/Computer-Agent.git
+   ```
+
+4. Run :
+```bash
+  cd Computer-Agent
+   ```
+5. Run :
+```bash
+  pip install -r requirements.txt
+   ```
 
 ### Step 5: Configure API Keys
 
-1. Open the 'API.py' Python file.
-2. Add your Gemini API key in place of 'YOUR_GEMINI_API_KEY'.
+1. Open the `API.py` Python file.
+2. Add your Gemini API key in place of `"YOUR_API_KEY"`.
 
 ## 🔑 Getting API Keys
 
