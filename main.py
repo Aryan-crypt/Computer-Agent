@@ -44,41 +44,73 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Windows 11 Keyboard Shortcuts Knowledge Base
 WINDOWS_SHORTCUTS = {
-    "minimize_all": ["win", "m"],
+    # Desktop Shortcuts
     "show_desktop": ["win", "d"],
-    "open_start": ["win"],
-    "search": ["win", "s"],
-    "run_dialog": ["win", "r"],
-    "task_manager": ["ctrl", "shift", "esc"],
-    "alt_tab": ["alt", "tab"],
-    "close_window": ["alt", "f4"],
+    "minimize_all": ["win", "m"],
+    "restore_minimized_windows": ["win", "shift", "m"],
+    "open_file_explorer": ["win", "e"],
+    "open_feedback_hub": ["win", "f"],
+
+    # Virtual Desktop Shortcuts
+    "create_virtual_desktop": ["win", "ctrl", "d"],
+    "switch_virtual_desktop_left": ["win", "ctrl", "left"],
+    "switch_virtual_desktop_right": ["win", "ctrl", "right"],
+    "close_current_virtual_desktop": ["win", "ctrl", "f4"],
+
+    # Windows Key Shortcuts
+    "open_settings": ["win", "i"],
+    "open_search": ["win", "s"],
+    "lock_pc": ["win", "l"],
+    "open_power_user_menu": ["win", "x"],
+    "open_clipboard_history": ["win", "v"],
+
+    # File Explorer Shortcuts
+    "open_new_file_explorer_window": ["ctrl", "n"],
+    "open_new_file_explorer_tab": ["ctrl", "t"],
+    "close_current_file_explorer_window": ["ctrl", "w"],
+    "focus_file_explorer_address_bar": ["alt", "d"],
+    "create_new_folder": ["ctrl", "shift", "n"],
+
+    # Windows Settings Page Shortcuts
+    "open_action_center": ["win", "a"],
+    "open_run_dialog": ["win", "r"],
+    "project_to_another_screen": ["win", "p"],
+    "open_ease_of_access_settings": ["win", "u"],
+
+    # Command Prompt Shortcuts
+    "cancel_command": ["ctrl", "c"],
+    "paste_in_command_prompt": ["ctrl", "v"],
+    "recall_previous_command": ["up"],
+
+    # Text Editing Shortcuts
     "copy": ["ctrl", "c"],
-    "paste": ["ctrl", "v"],
     "cut": ["ctrl", "x"],
+    "paste": ["ctrl", "v"],
     "undo": ["ctrl", "z"],
     "redo": ["ctrl", "y"],
+
+    # Taskbar Keyboard Shortcuts
+    "open_pinned_taskbar_app": ["win", "number"],  # Use a number from 1-9
+    "focus_taskbar": ["win", "t"],
+    "focus_system_tray": ["win", "b"],
+
+    # Dialog Box Shortcuts
+    "close_active_window": ["alt", "f4"],
+    "open_properties": ["alt", "enter"],
+    "switch_between_open_apps": ["alt", "tab"],
+
+    # Copy, Paste, and Other General Keyboard Shortcuts
     "select_all": ["ctrl", "a"],
-    "save": ["ctrl", "s"],
-    "new": ["ctrl", "n"],
-    "open": ["ctrl", "o"],
     "print": ["ctrl", "p"],
     "find": ["ctrl", "f"],
-    "screenshot": ["win", "shift", "s"],
-    "lock": ["win", "l"],
-    "emoji_panel": ["win", "."],
-    "clipboard_history": ["win", "v"],
-    "voice_typing": ["win", "h"],
-    "widgets": ["win", "w"],
-    "notification_center": ["win", "n"],
-    "quick_settings": ["win", "a"],
-    "snap_left": ["win", "left"],
-    "snap_right": ["win", "right"],
-    "maximize": ["win", "up"],
-    "minimize": ["win", "down"],
-    "virtual_desktop_new": ["win", "ctrl", "d"],
-    "virtual_desktop_close": ["win", "ctrl", "f4"],
-    "virtual_desktop_switch_right": ["win", "ctrl", "right"],
-    "virtual_desktop_switch_left": ["win", "ctrl", "left"],
+
+    # Copilot Shortcuts for Windows 11
+    "toggle_copilot": ["win", "c"],
+    "copilot_navigate_options": ["tab"],
+    "copilot_navigate_arrows": ["arrow_keys"],  # Up, down, left, right
+    "copilot_select_option": ["enter"],
+    "copilot_close": ["esc"],
+    "open_copilot_with_search": ["ctrl", "shift", "s"],
 }
 
 @dataclass
@@ -111,7 +143,7 @@ class CommanderAgent:
     def plan_task(self, user_prompt: str, current_screenshot: Optional[Image.Image] = None) -> List[Step]:
         """Generate a plan for completing the user's task"""
         
-        system_prompt = f"""You are an AI assistant that controls a Windows 11 PC. 
+        system_prompt = f"""You are an Very Clever and Smart AI assistant that controls a Windows 11 PC. 
         You need to plan steps to complete the user's task.
         
         Available Windows shortcuts:
@@ -121,12 +153,15 @@ class CommanderAgent:
         1. Always start by minimizing all windows (Win+M) for a clean slate
         2. Break down the task into small, atomic steps
         3. Prefer keyboard shortcuts when possible
-        4. For each step, specify if it needs:
+        4. Always before typing on an input area, click on that input area before typing
+        5. For each step, specify if it needs:
            - Keyboard shortcut
            - Mouse click (will need coordinate extraction)
-           - before typing on an input area, always click on that input area before typing
            - Text input
            - Content reading from screen
+        6. Tips :
+            - Claculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
+            - For enabling the searchbar in youtube click '/' then type the search query.
         
         Return a JSON array of steps with format:
         [
@@ -135,7 +170,7 @@ class CommanderAgent:
                 "action_type": "keyboard|mouse_click|type_text|read_content|wait",
                 "parameters": {{
                     "keys": ["key1", "key2"],  // for keyboard
-                    "target": "description of click target",  // for mouse_click
+                    "target": "description of click target in detailed way",  // for mouse_click
                     "text": "text to type",  // for type_text
                     "duration": 1.0  // for wait
                 }}
@@ -180,7 +215,7 @@ class CommanderAgent:
         prompt = f"""Analyze this screenshot and help me find: {target_description}
         
         Determine:
-        1. Is the target visible on screen?
+        1. Is the target visible on screen (Taskbar or desktop)?
         2. Can this be achieved with a keyboard shortcut?
         3. If mouse click is needed, describe exactly where to click
         
