@@ -44,73 +44,144 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Windows 11 Keyboard Shortcuts Knowledge Base
 WINDOWS_SHORTCUTS = {
-    # Desktop Shortcuts
-    "show_desktop": ["win", "d"],
     "minimize_all": ["win", "m"],
+    "show_desktop": ["win", "d"],
     "restore_minimized_windows": ["win", "shift", "m"],
     "open_file_explorer": ["win", "e"],
     "open_feedback_hub": ["win", "f"],
-
-    # Virtual Desktop Shortcuts
-    "create_virtual_desktop": ["win", "ctrl", "d"],
-    "switch_virtual_desktop_left": ["win", "ctrl", "left"],
-    "switch_virtual_desktop_right": ["win", "ctrl", "right"],
-    "close_current_virtual_desktop": ["win", "ctrl", "f4"],
-
-    # Windows Key Shortcuts
+    "virtual_desktop_new": ["win", "ctrl", "d"],
+    "virtual_desktop_switch_left": ["win", "ctrl", "left"],
+    "virtual_desktop_switch_right": ["win", "ctrl", "right"],
+    "virtual_desktop_close": ["win", "ctrl", "f4"],
     "open_settings": ["win", "i"],
-    "open_search": ["win", "s"],
-    "lock_pc": ["win", "l"],
+    "search": ["win", "s"],
+    "lock": ["win", "l"],
     "open_power_user_menu": ["win", "x"],
-    "open_clipboard_history": ["win", "v"],
-
-    # File Explorer Shortcuts
-    "open_new_file_explorer_window": ["ctrl", "n"],
-    "open_new_file_explorer_tab": ["ctrl", "t"],
-    "close_current_file_explorer_window": ["ctrl", "w"],
-    "focus_file_explorer_address_bar": ["alt", "d"],
+    "clipboard_history": ["win", "v"],
+    "new": ["ctrl", "n"],
+    "new_tab": ["ctrl", "t"],
+    "close_window": ["ctrl", "w"],
+    "focus_address_bar": ["alt", "d"],
     "create_new_folder": ["ctrl", "shift", "n"],
-
-    # Windows Settings Page Shortcuts
     "open_action_center": ["win", "a"],
-    "open_run_dialog": ["win", "r"],
-    "project_to_another_screen": ["win", "p"],
-    "open_ease_of_access_settings": ["win", "u"],
-
-    # Command Prompt Shortcuts
+    "run_dialog": ["win", "r"],
+    "project_screen": ["win", "p"],
+    "open_ease_of_access": ["win", "u"],
     "cancel_command": ["ctrl", "c"],
-    "paste_in_command_prompt": ["ctrl", "v"],
+    "paste": ["ctrl", "v"],
     "recall_previous_command": ["up"],
-
-    # Text Editing Shortcuts
     "copy": ["ctrl", "c"],
     "cut": ["ctrl", "x"],
-    "paste": ["ctrl", "v"],
     "undo": ["ctrl", "z"],
     "redo": ["ctrl", "y"],
-
-    # Taskbar Keyboard Shortcuts
-    "open_pinned_taskbar_app": ["win", "number"],  # Use a number from 1-9
+    "open_taskbar_app": ["win", "number"],
     "focus_taskbar": ["win", "t"],
     "focus_system_tray": ["win", "b"],
-
-    # Dialog Box Shortcuts
-    "close_active_window": ["alt", "f4"],
+    "alt_tab": ["alt", "tab"],
+    "close_window_alt": ["alt", "f4"],
     "open_properties": ["alt", "enter"],
-    "switch_between_open_apps": ["alt", "tab"],
-
-    # Copy, Paste, and Other General Keyboard Shortcuts
     "select_all": ["ctrl", "a"],
     "print": ["ctrl", "p"],
     "find": ["ctrl", "f"],
-
-    # Copilot Shortcuts for Windows 11
-    "toggle_copilot": ["win", "c"],
+    "open_copilot": ["win", "c"],
     "copilot_navigate_options": ["tab"],
-    "copilot_navigate_arrows": ["arrow_keys"],  # Up, down, left, right
-    "copilot_select_option": ["enter"],
+    "copilot_navigate_arrows": ["arrow_keys"],
+    "copilot_select": ["enter"],
     "copilot_close": ["esc"],
-    "open_copilot_with_search": ["ctrl", "shift", "s"],
+    "open_copilot_search": ["ctrl", "shift", "s"],
+    "toggle_copilot": ["win", "c"],
+    
+    # Chrome Browser Shortcuts
+    "chrome_new_window": ["ctrl", "n"],
+    "chrome_new_incognito_window": ["ctrl", "shift", "n"],
+    "chrome_new_tab": ["ctrl", "t"],
+    "chrome_reopen_closed_tab": ["ctrl", "shift", "t"],
+    "chrome_next_tab": ["ctrl", "tab"],
+    "chrome_next_tab_alt": ["ctrl", "pgdn"],
+    "chrome_previous_tab": ["ctrl", "shift", "tab"],
+    "chrome_previous_tab_alt": ["ctrl", "pgup"],
+    "chrome_specific_tab": ["ctrl", "number"],
+    "chrome_rightmost_tab": ["ctrl", "9"],
+    "chrome_home_page": ["alt", "home"],
+    "chrome_history_back": ["alt", "left"],
+    "chrome_history_forward": ["alt", "right"],
+    "chrome_close_tab": ["ctrl", "w"],
+    "chrome_close_tab_alt": ["ctrl", "f4"],
+    "chrome_close_window": ["ctrl", "shift", "w"],
+    "chrome_close_window_alt": ["alt", "f4"],
+    "chrome_minimize_window": ["alt", "space", "n"],
+    "chrome_maximize_window": ["alt", "space", "x"],
+    "chrome_quit": ["alt", "f", "x"],
+    "chrome_move_tab_right": ["ctrl", "shift", "pgdn"],
+    "chrome_move_tab_left": ["ctrl", "shift", "pgup"],
+    "chrome_fullscreen_on": ["f11"],
+    "chrome_fullscreen_off": ["f11"],
+    "chrome_fullscreen_off_alt": ["esc"],
+    "chrome_tab_group_focus": ["f6"],
+    "chrome_tab_group_menu": ["menu"],
+    "chrome_tab_group_expand": ["space"],
+    "chrome_tab_group_expand_alt": ["enter"],
+    "chrome_tab_group_move": ["ctrl", "left"],
+    "chrome_tab_group_move_alt": ["ctrl", "right"],
+    "chrome_menu": ["alt", "f"],
+    "chrome_menu_alt": ["alt", "e"],
+    "chrome_bookmarks_bar": ["ctrl", "shift", "b"],
+    "chrome_bookmarks_manager": ["ctrl", "shift", "o"],
+    "chrome_history": ["ctrl", "h"],
+    "chrome_downloads": ["ctrl", "j"],
+    "chrome_task_manager": ["shift", "esc"],
+    "chrome_toolbar_focus": ["shift", "alt", "t"],
+    "chrome_toolbar_focus_right": ["f10"],
+    "chrome_dialog_focus": ["f6"],
+    "chrome_find": ["ctrl", "f"],
+    "chrome_find_alt": ["f3"],
+    "chrome_find_next": ["ctrl", "g"],
+    "chrome_find_previous": ["ctrl", "shift", "g"],
+    "chrome_dev_tools": ["ctrl", "shift", "j"],
+    "chrome_dev_tools_alt": ["f12"],
+    "chrome_clear_browsing_data": ["ctrl", "shift", "delete"],
+    "chrome_help": ["f1"],
+    "chrome_switch_user": ["ctrl", "shift", "m"],
+    "chrome_feedback": ["alt", "shift", "i"],
+    "chrome_caret_browsing": ["f7"],
+    "chrome_skip_to_content": ["ctrl", "f6"],
+    "chrome_inactive_dialog": ["alt", "shift", "a"],
+    "chrome_address_bar": ["ctrl", "l"],
+    "chrome_address_bar_alt": ["alt", "d"],
+    "chrome_address_bar_alt2": ["f6"],
+    "chrome_search": ["ctrl", "k"],
+    "chrome_search_alt": ["ctrl", "e"],
+    "chrome_print": ["ctrl", "p"],
+    "chrome_save_page": ["ctrl", "s"],
+    "chrome_reload": ["f5"],
+    "chrome_reload_alt": ["ctrl", "r"],
+    "chrome_hard_reload": ["shift", "f5"],
+    "chrome_hard_reload_alt": ["ctrl", "shift", "r"],
+    "chrome_stop_loading": ["esc"],
+    "chrome_open_file": ["ctrl", "o"],
+    "chrome_view_source": ["ctrl", "u"],
+    "chrome_bookmark_page": ["ctrl", "d"],
+    "chrome_bookmark_all_tabs": ["ctrl", "shift", "d"],
+    "chrome_zoom_in": ["ctrl", "+"],
+    "chrome_zoom_out": ["ctrl", "-"],
+    "chrome_zoom_reset": ["ctrl", "0"],
+    "chrome_page_down": ["space"],
+    "chrome_page_down_alt": ["pgdn"],
+    "chrome_page_up": ["shift", "space"],
+    "chrome_page_up_alt": ["pgup"],
+    "chrome_top_of_page": ["home"],
+    "chrome_bottom_of_page": ["end"],
+    "chrome_horizontal_scroll": ["shift", "mousewheel"],
+    "chrome_previous_word": ["ctrl", "left"],
+    "chrome_next_word": ["ctrl", "right"],
+    "chrome_delete_previous_word": ["ctrl", "backspace"],
+    "chrome_link_new_tab": ["ctrl", "click"],
+    "chrome_link_new_tab_switch": ["ctrl", "shift", "click"],
+    "chrome_link_new_window": ["shift", "click"],
+    "chrome_link_download": ["alt", "click"],
+    "chrome_maximize_toggle": ["double_click"],
+    "chrome_zoom_in_mouse": ["ctrl", "mousewheel_up"],
+    "chrome_zoom_out_mouse": ["ctrl", "mousewheel_down"],
 }
 
 @dataclass
@@ -146,7 +217,7 @@ class CommanderAgent:
         system_prompt = f"""You are an Very Clever and Smart AI assistant that controls a Windows 11 PC. 
         You need to plan steps to complete the user's task.
         
-        Available Windows shortcuts:
+        Available Windows 11 and Google Chrome shortcuts:
         {self.shortcuts_knowledge}
         
         When planning:
