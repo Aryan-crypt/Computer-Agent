@@ -93,7 +93,7 @@ class CommanderAgent:
             - Claculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
             - For enabling the searchbar in youtube click '/' then type the search query.
         7. Remember :
-            - Do not copy or select any text, because you are not allowed to select text rather than read it.
+            - Do not copy or select any text, because you are not allowed to select text rather than read_content then type_text.
 
         Return a JSON array of steps with format:
         [
