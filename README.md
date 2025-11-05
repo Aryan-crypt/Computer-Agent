@@ -79,17 +79,26 @@ Follow these steps carefully to get everything working:
 1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
 2. Sign in with your Google account
 3. Click "Create API Key"
-4. Copy the key and paste it in the script
+4. Copy the key and paste it in the file `API.py` Python file in place of `"YOUR_API_KEY"`.
 
 ## 🎮 How to Use
 
 1. Run :
 ```bash
+  python UI.py
+   ```
+2. Type your command
+3. Watch the agent work its magic!
+
+## >_ Terminal Run
+
+1. Run :
+```bash
   python main.py
    ```
-6. Type your command when prompted
-7. Confirm you want to proceed
-8. Watch the agent work its magic!
+2. Type your command when prompted
+3. Confirm you want to proceed
+4. Watch the agent work its magic!
 
 ## 💡 Example Commands
 

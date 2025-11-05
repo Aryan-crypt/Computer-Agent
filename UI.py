@@ -1,10 +1,11 @@
 """
-PC Control AI Agent with Multi-Model Architecture
+PC Control AI Agent with Multi-Model Architecture and UI
 Uses Gemini 2.5 Pro for planning, Holo 1.5 for coordinate extraction, 
 and Pollinations OpenAI for content reading/writing
 """
 
 import os
+import sys
 import time
 import json
 import base64
@@ -33,6 +34,13 @@ import requests
 import urllib.parse
 from API import GEMINI_API_KEY
 
+# PyQt5 for UI
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QTextEdit, QPushButton, QLabel, 
+                             QScrollArea, QFrame, QLineEdit, QSplitter)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
+from PyQt5.QtGui import QFont, QTextCursor, QColor, QPalette
+
 # Configure pyautogui for safety
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.5
@@ -47,7 +55,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 class Step:
     """Represents a single step in the task execution"""
     description: str
-    action_type: str  # 'keyboard', 'mouse_click', 'mouse_move', 'type_text', 'read_content'
+    action_type: str
     parameters: Dict[str, Any]
     completed: bool = False
     result: Optional[str] = None
@@ -113,7 +121,6 @@ class CommanderAgent:
         
         try:
             if current_screenshot:
-                # Convert PIL Image to bytes for Gemini
                 img_byte_arr = BytesIO()
                 current_screenshot.save(img_byte_arr, format='PNG')
                 img_byte_arr = img_byte_arr.getvalue()
@@ -125,9 +132,7 @@ class CommanderAgent:
             else:
                 response = self.model.generate_content(system_prompt)
             
-            # Parse JSON response
             response_text = response.text
-            # Extract JSON from response
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 steps_data = json.loads(json_match.group())
@@ -194,7 +199,6 @@ class CoordinateExtractor:
         """Extract coordinates of target element from screenshot"""
         
         if not self.client:
-            # Fallback to center of screen if Holo is not available
             print("Holo 1.5 not available, using fallback coordinate extraction")
             return self._fallback_extraction(screenshot_path, target_description)
         
@@ -205,8 +209,6 @@ class CoordinateExtractor:
                 api_name="/localize"
             )
             
-            # Parse coordinates from result
-            # Result format may vary, looking for x,y coordinates
             coord_pattern = r'(?:x[:\s]*)?(\d+)[,\s]+(?:y[:\s]*)?(\d+)'
             match = re.search(coord_pattern, str(result), re.IGNORECASE)
             
@@ -225,7 +227,6 @@ class CoordinateExtractor:
         """Fallback method using OCR and pattern matching"""
         try:
             img = Image.open(screenshot_path)
-            # Simple center-based fallback
             return (img.width // 2, img.height // 2)
         except:
             return None
@@ -234,20 +235,17 @@ class ContentProcessor:
     """Pollinations OpenAI model for reading and writing content"""
     
     def __init__(self):
-        #self.api_key = POLLINATIONS_API_KEY
         self.base_url = POLLINATIONS_BASE_URL
         
     def read_content(self, screenshot: Image.Image, instruction: str = "Read all text from this image") -> str:
         """Read and extract content from screenshot"""
         
-        # Convert image to base64
         buffered = BytesIO()
         screenshot.save(buffered, format="PNG")
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
         
         headers = {
             "Content-Type": "application/json",
-            
         }
         
         payload = {
@@ -276,7 +274,6 @@ class ContentProcessor:
             return result['choices'][0]['message']['content']
         except Exception as e:
             print(f"Error reading content: {e}")
-            # Fallback to OCR
             return self._ocr_fallback(screenshot)
     
     def _ocr_fallback(self, screenshot: Image.Image) -> str:
@@ -287,46 +284,26 @@ class ContentProcessor:
         except Exception as e:
             print(f"OCR fallback failed: {e}")
             return ""
-    
-    def generate_text(self, prompt: str) -> str:
-        """Generate text based on prompt"""
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        payload = {
-            "model": "openai",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 500
-        }
-        
-        try:
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        except Exception as e:
-            print(f"Error generating text: {e}")
-            return ""
 
 class PCControlAgent:
     """Main orchestrator agent that coordinates all components"""
     
-    def __init__(self):
+    def __init__(self, status_callback=None):
         self.commander = CommanderAgent()
         self.coordinate_extractor = CoordinateExtractor()
         self.content_processor = ContentProcessor()
         self.current_screenshot = None
         self.screenshot_history = []
-        self.temp_screenshots = []  # Track temporary screenshot files
+        self.temp_screenshots = []
+        self.status_callback = status_callback
         
-        # Set up pyautogui settings
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.5
+    
+    def emit_status(self, message: str, status_type: str = "info"):
+        """Emit status message to UI"""
+        if self.status_callback:
+            self.status_callback(message, status_type)
         
     def take_screenshot(self, save_path: Optional[str] = None) -> Image.Image:
         """Take a screenshot of the entire screen"""
@@ -336,9 +313,8 @@ class PCControlAgent:
         
         if save_path:
             screenshot.save(save_path)
-            self.temp_screenshots.append(save_path)  # Track file for cleanup
+            self.temp_screenshots.append(save_path)
             
-        # Keep only last 10 screenshots in memory
         if len(self.screenshot_history) > 10:
             self.screenshot_history.pop(0)
             
@@ -349,7 +325,6 @@ class PCControlAgent:
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-                print(f"Deleted screenshot: {filepath}")
                 if filepath in self.temp_screenshots:
                     self.temp_screenshots.remove(filepath)
         except Exception as e:
@@ -357,11 +332,9 @@ class PCControlAgent:
     
     def cleanup_all_screenshots(self):
         """Delete all temporary screenshots"""
-        print("\nCleaning up temporary screenshots...")
-        for filepath in self.temp_screenshots[:]:  # Create copy to iterate
+        for filepath in self.temp_screenshots[:]:
             self.cleanup_screenshot(filepath)
         self.temp_screenshots.clear()
-        print("Screenshot cleanup complete.")
     
     def execute_keyboard_action(self, keys: List[str]) -> bool:
         """Execute a keyboard shortcut or key combination"""
@@ -409,7 +382,7 @@ class PCControlAgent:
     def execute_step(self, step: Step) -> bool:
         """Execute a single step in the plan"""
         
-        print(f"\nExecuting step: {step.description}")
+        self.emit_status(f"Executing: {step.description}", "executing")
         
         temp_screenshot_path = None
         
@@ -419,26 +392,21 @@ class PCControlAgent:
                 success = self.execute_keyboard_action(keys)
                 
             elif step.action_type == "mouse_click":
-                # Take screenshot and find coordinates
                 temp_screenshot_path = "temp_screenshot.png"
                 screenshot = self.take_screenshot(temp_screenshot_path)
                 target = step.parameters.get("target", "")
                 
-                # Try to extract coordinates
                 coords = self.coordinate_extractor.extract_coordinates(temp_screenshot_path, target)
                 
                 if coords:
                     success = self.execute_mouse_click(coords[0], coords[1])
                 else:
-                    print(f"Could not find coordinates for: {target}")
-                    # Try alternative approach with Commander analysis
                     analysis = self.commander.analyze_screenshot(screenshot, target)
                     if analysis.get("use_keyboard") and analysis.get("keyboard_shortcut"):
                         success = self.execute_keyboard_action(analysis["keyboard_shortcut"])
                     else:
                         success = False
                 
-                # Clean up temp screenshot immediately after use
                 if temp_screenshot_path:
                     self.cleanup_screenshot(temp_screenshot_path)
                         
@@ -451,7 +419,6 @@ class PCControlAgent:
                 instruction = step.parameters.get("instruction", "Read all text from screen")
                 content = self.content_processor.read_content(screenshot, instruction)
                 step.result = content
-                print(f"Read content: {content[:200]}...")
                 success = True
                 
             elif step.action_type == "wait":
@@ -460,15 +427,19 @@ class PCControlAgent:
                 success = True
                 
             else:
-                print(f"Unknown action type: {step.action_type}")
                 success = False
                 
             step.completed = success
+            
+            if success:
+                self.emit_status(f"✓ Completed: {step.description}", "success")
+            else:
+                self.emit_status(f"✗ Failed: {step.description}", "error")
+            
             return success
             
         except Exception as e:
-            print(f"Error executing step: {e}")
-            # Clean up on error
+            self.emit_status(f"✗ Error: {step.description} - {str(e)}", "error")
             if temp_screenshot_path:
                 self.cleanup_screenshot(temp_screenshot_path)
             step.completed = False
@@ -477,34 +448,26 @@ class PCControlAgent:
     def execute_task(self, user_prompt: str) -> Dict[str, Any]:
         """Main method to execute a complete task"""
         
-        print(f"\n{'='*60}")
-        print(f"Starting task: {user_prompt}")
-        print(f"{'='*60}")
+        self.emit_status(f"Starting task: {user_prompt}", "info")
         
-        # First, minimize all windows
-        print("\nMinimizing all windows...")
+        # Minimize all windows except our UI
+        self.emit_status("Minimizing windows...", "info")
         self.execute_keyboard_action(["win", "m"])
         time.sleep(1)
         
-        # Take initial screenshot
         initial_screenshot = self.take_screenshot("initial_state.png")
         
-        # Generate plan
-        print("\nGenerating execution plan...")
+        self.emit_status("Generating execution plan...", "info")
         steps = self.commander.plan_task(user_prompt, initial_screenshot)
         
-        # Clean up initial screenshot after plan is generated
         self.cleanup_screenshot("initial_state.png")
         
         if not steps:
-            print("Failed to generate plan")
+            self.emit_status("Failed to generate plan", "error")
             return {"success": False, "error": "Could not generate execution plan"}
         
-        print(f"\nPlan generated with {len(steps)} steps:")
-        for i, step in enumerate(steps, 1):
-            print(f"  {i}. {step.description}")
+        self.emit_status(f"Plan generated: {len(steps)} steps", "success")
         
-        # Execute steps
         results = {
             "success": True,
             "steps_completed": 0,
@@ -513,16 +476,13 @@ class PCControlAgent:
         }
         
         for i, step in enumerate(steps, 1):
-            print(f"\n[Step {i}/{len(steps)}]")
+            self.emit_status(f"[Step {i}/{len(steps)}]", "info")
             
-            # Take screenshot before each step
             step_screenshot_path = f"step_{i}_before.png"
             self.take_screenshot(step_screenshot_path)
             
-            # Execute the step
             success = self.execute_step(step)
             
-            # Clean up step screenshot after execution
             self.cleanup_screenshot(step_screenshot_path)
             
             results["step_results"].append({
@@ -534,109 +494,309 @@ class PCControlAgent:
             
             if success:
                 results["steps_completed"] += 1
-            else:
-                print(f"Step {i} failed. Attempting to continue...")
-                # Optionally, we could try to recover here
             
-            # Small delay between steps
             time.sleep(0.5)
         
-        # Take final screenshot
         final_screenshot_path = "final_state.png"
         self.take_screenshot(final_screenshot_path)
-        
-        # Clean up final screenshot after a short delay (to allow viewing if needed)
         time.sleep(1)
         self.cleanup_screenshot(final_screenshot_path)
         
-        # Final cleanup of any remaining screenshots
         self.cleanup_all_screenshots()
         
-        print(f"\n{'='*60}")
-        print(f"Task completed: {results['steps_completed']}/{results['total_steps']} steps successful")
-        print(f"{'='*60}")
+        self.emit_status(f"Task completed: {results['steps_completed']}/{results['total_steps']} steps successful", "success")
         
         return results
 
+
+class TaskExecutionThread(QThread):
+    """Thread for executing tasks without blocking UI"""
+    
+    finished = pyqtSignal(dict)
+    
+    def __init__(self, agent, task):
+        super().__init__()
+        self.agent = agent
+        self.task = task
+    
+    def run(self):
+        result = self.agent.execute_task(self.task)
+        self.finished.emit(result)
+
+
+class PCControlUI(QMainWindow):
+    """Main UI window for PC Control Agent"""
+    
+    def __init__(self):
+        super().__init__()
+        self.agent = None
+        self.execution_thread = None
+        self.init_ui()
+        self.init_agent()
+        self.position_window()
+        
+    def init_ui(self):
+        """Initialize the user interface"""
+        self.setWindowTitle("PC Control AI Agent")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        
+        # Main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Title bar with close button
+        title_bar = QFrame()
+        title_bar.setStyleSheet("background-color: #2c3e50; padding: 5px;")
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(5, 5, 5, 5)
+        
+        title_label = QLabel("PC Control AI Agent")
+        title_label.setStyleSheet("color: white; font-weight: bold; font-size: 12px;")
+        title_layout.addWidget(title_label)
+        
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(25, 25)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        close_btn.clicked.connect(self.close)
+        title_layout.addWidget(close_btn)
+        
+        main_layout.addWidget(title_bar)
+        
+        # Chat interface
+        chat_frame = QFrame()
+        chat_frame.setStyleSheet("background-color: #ecf0f1; border-radius: 5px;")
+        chat_layout = QVBoxLayout(chat_frame)
+        
+        chat_label = QLabel("Chat Interface")
+        chat_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #2c3e50;")
+        chat_layout.addWidget(chat_label)
+        
+        self.chat_display = QTextEdit()
+        self.chat_display.setReadOnly(True)
+        self.chat_display.setMaximumHeight(150)
+        self.chat_display.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                border: 1px solid #bdc3c7;
+                border-radius: 3px;
+                padding: 5px;
+                font-size: 10px;
+            }
+        """)
+        chat_layout.addWidget(self.chat_display)
+        
+        # Input area
+        input_layout = QHBoxLayout()
+        self.task_input = QLineEdit()
+        self.task_input.setPlaceholderText("Enter your task here...")
+        self.task_input.setStyleSheet("""
+            QLineEdit {
+                background-color: white;
+                border: 1px solid #bdc3c7;
+                border-radius: 3px;
+                padding: 5px;
+                font-size: 10px;
+            }
+        """)
+        self.task_input.returnPressed.connect(self.execute_task)
+        input_layout.addWidget(self.task_input)
+        
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setFixedWidth(60)
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 5px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:disabled {
+                background-color: #95a5a6;
+            }
+        """)
+        self.send_btn.clicked.connect(self.execute_task)
+        input_layout.addWidget(self.send_btn)
+        
+        chat_layout.addLayout(input_layout)
+        main_layout.addWidget(chat_frame)
+        
+        # Status display
+        status_frame = QFrame()
+        status_frame.setStyleSheet("background-color: #ecf0f1; border-radius: 5px; margin-top: 5px;")
+        status_layout = QVBoxLayout(status_frame)
+        
+        status_label = QLabel("Live Status")
+        status_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #2c3e50;")
+        status_layout.addWidget(status_label)
+        
+        self.status_display = QTextEdit()
+        self.status_display.setReadOnly(True)
+        self.status_display.setMaximumHeight(200)
+        self.status_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #2c3e50;
+                color: #ecf0f1;
+                border: 1px solid #34495e;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: 'Courier New';
+                font-size: 9px;
+            }
+        """)
+        status_layout.addWidget(self.status_display)
+        
+        main_layout.addWidget(status_frame)
+        
+        # Set fixed size
+        self.setFixedSize(400, 450)
+        
+        # Add welcome message
+        self.add_chat_message("Welcome to PC Control AI Agent!", "system")
+        self.add_chat_message("Enter a task and I'll help you complete it.", "system")
+    
+    def init_agent(self):
+        """Initialize the PC Control Agent"""
+        self.agent = PCControlAgent(status_callback=self.update_status)
+        self.add_status("Agent initialized and ready", "success")
+    
+    def position_window(self):
+        """Position window at bottom-right corner"""
+        screen = QApplication.desktop().screenGeometry()
+        x = screen.width() - self.width() - 20
+        y = screen.height() - self.height() - 60
+        self.move(x, y)
+    
+    def add_chat_message(self, message: str, sender: str = "user"):
+        """Add a message to the chat display"""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        
+        if sender == "user":
+            color = "#2c3e50"
+            prefix = "You: "
+        elif sender == "agent":
+            color = "#27ae60"
+            prefix = "Agent: "
+        else:
+            color = "#7f8c8d"
+            prefix = "System: "
+        
+        cursor.insertHtml(f'<span style="color: {color}; font-weight: bold;">{prefix}</span>')
+        cursor.insertHtml(f'<span style="color: #2c3e50;">{message}</span><br>')
+        
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.ensureCursorVisible()
+    
+    def add_status(self, message: str, status_type: str = "info"):
+        """Add a status message to the status display"""
+        cursor = self.status_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        
+        timestamp = time.strftime("%H:%M:%S")
+        
+        if status_type == "success":
+            color = "#2ecc71"
+            icon = "✓"
+        elif status_type == "error":
+            color = "#e74c3c"
+            icon = "✗"
+        elif status_type == "executing":
+            color = "#f39c12"
+            icon = "►"
+        else:
+            color = "#3498db"
+            icon = "•"
+        
+        cursor.insertHtml(f'<span style="color: #95a5a6;">[{timestamp}]</span> ')
+        cursor.insertHtml(f'<span style="color: {color};">{icon}</span> ')
+        cursor.insertHtml(f'<span style="color: #ecf0f1;">{message}</span><br>')
+        
+        self.status_display.setTextCursor(cursor)
+        self.status_display.ensureCursorVisible()
+    
+    def update_status(self, message: str, status_type: str = "info"):
+        """Update status from agent callback"""
+        self.add_status(message, status_type)
+    
+    def execute_task(self):
+        """Execute the task entered by user"""
+        task = self.task_input.text().strip()
+        
+        if not task:
+            return
+        
+        if self.execution_thread and self.execution_thread.isRunning():
+            self.add_chat_message("Please wait for the current task to complete.", "system")
+            return
+        
+        self.add_chat_message(task, "user")
+        self.task_input.clear()
+        self.task_input.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        
+        # Start execution in separate thread
+        self.execution_thread = TaskExecutionThread(self.agent, task)
+        self.execution_thread.finished.connect(self.on_task_finished)
+        self.execution_thread.start()
+    
+    def on_task_finished(self, result):
+        """Handle task completion"""
+        success = result.get("success", False)
+        steps_completed = result.get("steps_completed", 0)
+        total_steps = result.get("total_steps", 0)
+        
+        message = f"Task completed: {steps_completed}/{total_steps} steps successful"
+        self.add_chat_message(message, "agent")
+        
+        self.task_input.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.task_input.setFocus()
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press for window dragging"""
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for window dragging"""
+        if event.buttons() == Qt.LeftButton:
+            self.move(event.globalPos() - self.drag_position)
+            event.accept()
+
+
 def main():
-    """Main function to run the PC Control Agent"""
+    """Main function to run the PC Control Agent with UI"""
+    app = QApplication(sys.argv)
     
-    print("PC Control AI Agent")
-    print("=" * 60)
-    print("This agent can control your PC to complete tasks.")
-    print("Type 'exit' to quit.")
-    print("=" * 60)
+    # Set application style
+    app.setStyle('Fusion')
     
-    # Initialize the agent
-    agent = PCControlAgent()
+    # Create and show main window
+    window = PCControlUI()
+    window.show()
     
-    # Example tasks
-    example_tasks = [
-        "Open Chrome browser and search for 'what are allotropes of carbon' then write it in notepad",
-        "Open calculator and calculate 25 * 37",
-        "Take a screenshot and save it to desktop",
-        "Open notepad and write a short poem about computers"
-    ]
-    
-    print("\nExample tasks you can try:")
-    for i, task in enumerate(example_tasks, 1):
-        print(f"  {i}. {task}")
-    
-    try:
-        while True:
-            print("\n" + "-" * 60)
-            user_input = input("Enter your task (or 'exit' to quit): ").strip()
-            
-            if user_input.lower() == 'exit':
-                print("Exiting PC Control Agent. Goodbye!")
-                break
-            
-            if not user_input:
-                continue
-            
-            # Safety confirmation
-            print(f"\nYou want me to: {user_input}")
-            confirm = input("Proceed? (y/n): ").strip().lower()
-            
-            if confirm != 'y':
-                print("Task cancelled.")
-                continue
-            
-            try:
-                # Execute the task
-                results = agent.execute_task(user_input)
-                
-                # Print summary
-                print("\n" + "=" * 60)
-                print("TASK SUMMARY")
-                print("=" * 60)
-                print(f"Task: {user_input}")
-                print(f"Success: {results['success']}")
-                print(f"Steps completed: {results['steps_completed']}/{results['total_steps']}")
-                
-                if results.get('step_results'):
-                    print("\nStep Details:")
-                    for step_result in results['step_results']:
-                        status = "✓" if step_result['success'] else "✗"
-                        print(f"  {status} Step {step_result['step']}: {step_result['description']}")
-                        if step_result.get('result'):
-                            print(f"    Result: {step_result['result'][:100]}...")
-                
-            except KeyboardInterrupt:
-                print("\nTask interrupted by user.")
-                # Clean up on interrupt
-                agent.cleanup_all_screenshots()
-            except Exception as e:
-                print(f"\nError during task execution: {e}")
-                import traceback
-                traceback.print_exc()
-                # Clean up on error
-                agent.cleanup_all_screenshots()
-    
-    finally:
-        # Final cleanup when exiting the program
-        print("\nPerforming final cleanup...")
-        agent.cleanup_all_screenshots()
+    sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
