@@ -91,6 +91,8 @@ class CommanderAgent:
         5. Tips :
             - Claculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
             - For enabling the searchbar in youtube click '/' then type the search query.
+            - stop doing the old boring google search style, from now on always use this new fast AI style → "https://www.google.com/search?udm=50&aep=11&q=<query-with-plus-between-words>+in+one+line" then after that read the result.
+
         6. Remember :
             - Do not copy or select any text, because you are not allowed to select text rather than read_content then type_text.
 
