@@ -70,27 +70,9 @@ Follow these steps carefully to get everything working:
 ### Step 5: Configure API Keys
 
 1. Open the `API.py` Python file.
-2. Add your Gemini API key in place of `"YOUR_API_KEY"`.
-
-## 🔑 Getting API Keys
-
-### Gemini API Key
-
-1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Sign in with your Google account
-3. Click "Create API Key"
-4. Copy the key and paste it in the file `API.py` Python file in place of `"YOUR_API_KEY"`.
+2. Add your Gemini and OpenRouter API key in place of `"YOUR_API_KEY"`.
 
 ## 🎮 How to Use
-
-1. Run :
-```bash
-  python UI.py
-   ```
-2. Type your command
-3. Watch the agent work its magic!
-
-## >_ Terminal Run
 
 1. Run :
 ```bash
@@ -168,9 +150,8 @@ For major changes, please open an issue first to discuss what you would like to 
 
 ## 🙏 Acknowledgments
 
-- Gemini 2.0 Flash for task planning
-- Holo 1.5 for coordinate extraction
-- Pollinations OpenAI for content processing
+- Gemini 3.0 Flash for task planning
+- Gemma 4 for coordinate extraction and content processing
 - The open-source community for the various libraries used
 
 ## ⚠️ Disclaimer

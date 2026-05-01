@@ -1,7 +1,7 @@
 """
 PC Control AI Agent with Multi-Model Architecture
-Uses Gemini 2.5 Pro for planning, Holo 1.5 for coordinate extraction, 
-and Pollinations OpenAI for content reading/writing
+Uses Gemini 3.0 Flash for planning, Gemma 4 (via OpenRouter) for coordinate extraction
+and content reading/writing
 """
 
 import os
@@ -15,7 +15,6 @@ from enum import Enum
 import threading
 import queue
 from DataBase.shortcuts import WINDOWS_SHORTCUTS
-
 # Core libraries
 import pyautogui
 from PIL import Image, ImageDraw
@@ -27,21 +26,23 @@ import win32con
 from io import BytesIO
 
 # AI Model libraries
-import google.generativeai as genai
-from gradio_client import Client, handle_file
+import google.genai as genai
+from google.genai import types as genai_types
 import requests
 import urllib.parse
-from API import GEMINI_API_KEY
+from API import *
 
 # Configure pyautogui for safety
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.5
 
 # Configuration
-POLLINATIONS_BASE_URL = "https://text.pollinations.ai/openai"
+OPENROUTER_API_KEY = OpenRouter_API_KEY
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMMA4_MODEL = "google/gemma-4-31b-it:free"
 
 # Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 @dataclass
 class Step:
@@ -64,10 +65,10 @@ class ActionType(Enum):
     SCREENSHOT = "screenshot"
 
 class CommanderAgent:
-    """Gemini-based planning and command agent"""
+    """Gemini 3.0 Flash planning and command agent"""
     
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-2.5-pro')
+        self.model = "gemini-3-flash-preview"
         self.shortcuts_knowledge = json.dumps(WINDOWS_SHORTCUTS, indent=2)
         
     def plan_task(self, user_prompt: str, current_screenshot: Optional[Image.Image] = None) -> List[Step]:
@@ -91,8 +92,6 @@ class CommanderAgent:
         5. Tips :
             - Claculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
             - For enabling the searchbar in youtube click '/' then type the search query.
-            - stop doing the old boring google search style, from now on always use this new fast AI style → "https://www.google.com/search?udm=50&aep=11&q=<query-with-plus-between-words>+in+one+line" then after that read the result.
-
         6. Remember :
             - Do not copy or select any text, because you are not allowed to select text rather than read_content then type_text.
 
@@ -114,22 +113,23 @@ class CommanderAgent:
         """
         
         try:
+            contents = [system_prompt]
             if current_screenshot:
-                # Convert PIL Image to bytes for Gemini
                 img_byte_arr = BytesIO()
                 current_screenshot.save(img_byte_arr, format='PNG')
-                img_byte_arr = img_byte_arr.getvalue()
-                
-                response = self.model.generate_content([
-                    system_prompt,
-                    {"mime_type": "image/png", "data": img_byte_arr}
-                ])
-            else:
-                response = self.model.generate_content(system_prompt)
+                contents.append(
+                    genai_types.Part.from_bytes(
+                        data=img_byte_arr.getvalue(),
+                        mime_type="image/png"
+                    )
+                )
+
+            response = gemini_client.models.generate_content(
+                model=self.model,
+                contents=contents
+            )
             
-            # Parse JSON response
             response_text = response.text
-            # Extract JSON from response
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 steps_data = json.loads(json_match.group())
@@ -164,12 +164,17 @@ class CommanderAgent:
         try:
             img_byte_arr = BytesIO()
             screenshot.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
-            
-            response = self.model.generate_content([
-                prompt,
-                {"mime_type": "image/png", "data": img_byte_arr}
-            ])
+
+            response = gemini_client.models.generate_content(
+                model=self.model,
+                contents=[
+                    prompt,
+                    genai_types.Part.from_bytes(
+                        data=img_byte_arr.getvalue(),
+                        mime_type="image/png"
+                    )
+                ]
+            )
             
             response_text = response.text
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
@@ -183,106 +188,199 @@ class CommanderAgent:
             return {"target_found": False}
 
 class CoordinateExtractor:
-    """Holo 1.5 model for extracting coordinates from screenshots"""
+    """Gemma 4 (via OpenRouter) for extracting coordinates from screenshots"""
     
     def __init__(self):
-        try:
-            self.client = Client("Hcompany/Holo1.5-Localization")
-        except Exception as e:
-            print(f"Warning: Could not initialize Holo 1.5 client: {e}")
-            self.client = None
+        self.api_key = OPENROUTER_API_KEY
+        self.base_url = OPENROUTER_BASE_URL
+        self.model = GEMMA4_MODEL
     
     def extract_coordinates(self, screenshot_path: str, target_description: str) -> Optional[Tuple[int, int]]:
-        """Extract coordinates of target element from screenshot"""
-        
-        if not self.client:
-            # Fallback to center of screen if Holo is not available
-            print("Holo 1.5 not available, using fallback coordinate extraction")
-            return self._fallback_extraction(screenshot_path, target_description)
+        """Extract coordinates of target element from screenshot using Gemma 4"""
         
         try:
-            result = self.client.predict(
-                input_numpy_image=handle_file(screenshot_path),
-                task=f"Find and click on: {target_description}",
-                api_name="/localize"
+            width, height = pyautogui.size()
+
+            with open(screenshot_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            data_uri = f"data:image/png;base64,{base64_image}"
+
+            prompt = (
+                f"You are a UI assistant. Look at the screenshot and locate: {target_description}. "
+                "Return ONLY a JSON object with keys 'ymin', 'xmin', 'ymax', 'xmax' using a 0-1000 coordinate system. "
+                "No explanation, no markdown, just the JSON."
             )
-            
-            # Parse coordinates from result
-            # Result format may vary, looking for x,y coordinates
-            coord_pattern = r'(?:x[:\s]*)?(\d+)[,\s]+(?:y[:\s]*)?(\d+)'
-            match = re.search(coord_pattern, str(result), re.IGNORECASE)
-            
-            if match:
-                x, y = int(match.group(1)), int(match.group(2))
-                return (x, y)
-            else:
-                print(f"Could not parse coordinates from: {result}")
-                return None
-                
+
+            response = requests.post(
+                url=self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_uri}}
+                            ]
+                        }
+                    ]
+                },
+                timeout=30
+            )
+
+            response.raise_for_status()
+            text_response = response.json()["choices"][0]["message"]["content"]
+            print(f"[DEBUG] Gemma 4 coordinate response: {text_response}")
+
+            # Parse coordinates — try JSON first, fallback to regex
+            try:
+                obj = json.loads(text_response)
+                ymin, xmin, ymax, xmax = [float(obj[k]) for k in ("ymin", "xmin", "ymax", "xmax")]
+            except Exception:
+                numbers = re.findall(r"(\d+(?:\.\d+)?)", text_response)
+                if len(numbers) >= 4:
+                    ymin, xmin, ymax, xmax = [float(n) for n in numbers[:4]]
+                else:
+                    raise ValueError("Could not find 4 coordinates in response.")
+
+            # Convert 0-1000 scale to actual screen pixels
+            center_x_norm = (xmin + xmax) / 2
+            center_y_norm = (ymin + ymax) / 2
+            pixel_x = int((center_x_norm / 1000) * width)
+            pixel_y = int((center_y_norm / 1000) * height)
+
+            print(f"Target found at: ({pixel_x}, {pixel_y})")
+            return (pixel_x, pixel_y)
+
         except Exception as e:
-            print(f"Error extracting coordinates: {e}")
-            return self._fallback_extraction(screenshot_path, target_description)
-    
-    def _fallback_extraction(self, screenshot_path: str, target_description: str) -> Optional[Tuple[int, int]]:
-        """Fallback method using OCR and pattern matching"""
+            print(f"Error extracting coordinates with Gemma 4 (OpenRouter): {e}")
+            print("Trying Gemini 3 Flash as backup for coordinate extraction...")
+            return self._gemini_fallback_extraction(screenshot_path, target_description)
+
+    def _gemini_fallback_extraction(self, screenshot_path: str, target_description: str) -> Optional[Tuple[int, int]]:
+        """Fallback: use Gemini 3 Flash to extract coordinates"""
+        try:
+            width, height = pyautogui.size()
+            with open(screenshot_path, "rb") as f:
+                img_bytes = f.read()
+            prompt = (
+                f"Detect the {target_description}. "
+                "Return only the coordinates as [ymin, xmin, ymax, xmax] "
+                "using a 0-1000 coordinate system. No explanation, just the numbers."
+            )
+            response = gemini_client.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=[
+                    prompt,
+                    genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png")
+                ]
+            )
+            text_response = response.text
+            print(f"[DEBUG] Gemini 3 Flash coordinate response: {text_response}")
+
+            numbers = re.findall(r"(\d+(?:\.\d+)?)", text_response)
+            if len(numbers) >= 4:
+                ymin, xmin, ymax, xmax = [float(n) for n in numbers[:4]]
+                center_x_norm = (xmin + xmax) / 2
+                center_y_norm = (ymin + ymax) / 2
+                pixel_x = int((center_x_norm / 1000) * width)
+                pixel_y = int((center_y_norm / 1000) * height)
+                print(f"[Gemini Fallback] Target found at: ({pixel_x}, {pixel_y})")
+                return (pixel_x, pixel_y)
+            else:
+                raise ValueError(f"Could not find 4 coordinates in Gemini response: {text_response}")
+
+        except Exception as e:
+            print(f"Error extracting coordinates with Gemini 3 Flash: {e}")
+            return self._center_fallback(screenshot_path)
+
+    def _center_fallback(self, screenshot_path: str) -> Optional[Tuple[int, int]]:
+        """Last resort: return center of screen"""
         try:
             img = Image.open(screenshot_path)
-            # Simple center-based fallback
+            print("[Fallback] Using center of screen as coordinate.")
             return (img.width // 2, img.height // 2)
         except:
             return None
 
 class ContentProcessor:
-    """Pollinations OpenAI model for reading and writing content"""
+    """Gemma 4 (via OpenRouter) for reading and writing content"""
     
     def __init__(self):
-        #self.api_key = POLLINATIONS_API_KEY
-        self.base_url = POLLINATIONS_BASE_URL
-        
+        self.api_key = OPENROUTER_API_KEY
+        self.base_url = OPENROUTER_BASE_URL
+        self.model = GEMMA4_MODEL
+
+    def _call_gemma4(self, messages: list, max_tokens: int = 1000) -> str:
+        """Helper to call Gemma 4 via OpenRouter"""
+        response = requests.post(
+            url=self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": max_tokens
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    def _call_gemini_flash(self, prompt: str, screenshot: Image.Image = None) -> str:
+        """Fallback: call Gemini 3 Flash for content reading/generation"""
+        contents = [prompt]
+        if screenshot:
+            img_byte_arr = BytesIO()
+            screenshot.save(img_byte_arr, format="PNG")
+            contents.append(
+                genai_types.Part.from_bytes(
+                    data=img_byte_arr.getvalue(),
+                    mime_type="image/png"
+                )
+            )
+        response = gemini_client.models.generate_content(
+            model="gemini-3-flash-preview",
+            contents=contents
+        )
+        return response.text
+
     def read_content(self, screenshot: Image.Image, instruction: str = "Read all text from this image") -> str:
-        """Read and extract content from screenshot"""
-        
-        # Convert image to base64
+        """Read and extract content from screenshot using Gemma 4, with Gemini 3 Flash backup"""
         buffered = BytesIO()
         screenshot.save(buffered, format="PNG")
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
-        
-        headers = {
-            "Content-Type": "application/json",
-            
-        }
-        
-        payload = {
-            "model": "openai",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": instruction},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "max_tokens": 1000
-        }
+        data_uri = f"data:image/png;base64,{img_base64}"
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instruction},
+                    {"type": "image_url", "image_url": {"url": data_uri}}
+                ]
+            }
+        ]
         
         try:
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return result['choices'][0]['message']['content']
+            return self._call_gemma4(messages, max_tokens=1000)
         except Exception as e:
-            print(f"Error reading content: {e}")
-            # Fallback to OCR
-            return self._ocr_fallback(screenshot)
-    
+            print(f"Error reading content with Gemma 4 (OpenRouter): {e}")
+            print("Trying Gemini 3 Flash as backup for content reading...")
+            try:
+                return self._call_gemini_flash(instruction, screenshot)
+            except Exception as e2:
+                print(f"Error reading content with Gemini 3 Flash: {e2}")
+                return self._ocr_fallback(screenshot)
+
     def _ocr_fallback(self, screenshot: Image.Image) -> str:
-        """Fallback OCR method"""
+        """Last resort OCR fallback"""
         try:
             text = pytesseract.image_to_string(screenshot)
             return text.strip()
@@ -291,29 +389,18 @@ class ContentProcessor:
             return ""
     
     def generate_text(self, prompt: str) -> str:
-        """Generate text based on prompt"""
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        payload = {
-            "model": "openai",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 500
-        }
-        
+        """Generate text using Gemma 4, with Gemini 3 Flash backup"""
+        messages = [{"role": "user", "content": prompt}]
         try:
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            return result['choices'][0]['message']['content']
+            return self._call_gemma4(messages, max_tokens=500)
         except Exception as e:
-            print(f"Error generating text: {e}")
-            return ""
+            print(f"Error generating text with Gemma 4 (OpenRouter): {e}")
+            print("Trying Gemini 3 Flash as backup for text generation...")
+            try:
+                return self._call_gemini_flash(prompt)
+            except Exception as e2:
+                print(f"Error generating text with Gemini 3 Flash: {e2}")
+                return ""
 
 class PCControlAgent:
     """Main orchestrator agent that coordinates all components"""
@@ -500,7 +587,8 @@ class PCControlAgent:
         
         if not steps:
             print("Failed to generate plan")
-            return {"success": False, "error": "Could not generate execution plan"}
+            return {"success": False, "error": "Could not generate execution plan",
+                    "steps_completed": 0, "total_steps": 0, "step_results": []}
         
         print(f"\nPlan generated with {len(steps)} steps:")
         for i, step in enumerate(steps, 1):

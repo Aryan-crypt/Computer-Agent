@@ -12,12 +12,9 @@ Pillow
 pytesseract
 
 # AI Model Clients
-google-generativeai
+google-genai
 gradio-client
 requests
-
-# UI
-PyQt5
 
 # NOTE: pytesseract requires the Tesseract OCR engine to be installed on your system.
 # For Windows, download and install from: https://github.com/UB-Mannheim/tesseract/wiki
