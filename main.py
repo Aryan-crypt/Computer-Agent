@@ -2,6 +2,8 @@
 PC Control AI Agent with Multi-Model Architecture
 Uses Gemini 3.0 Flash for planning, Gemma 4 (via OpenRouter) for coordinate extraction
 and content reading/writing
+
+NEW FEATURE: Self-healing Re-plan approach on step failure.
 """
 
 import os
@@ -15,6 +17,7 @@ from enum import Enum
 import threading
 import queue
 from DataBase.shortcuts import WINDOWS_SHORTCUTS
+
 # Core libraries
 import pyautogui
 from PIL import Image, ImageDraw
@@ -90,10 +93,12 @@ class CommanderAgent:
            - Text input
            - Content reading from screen
         5. Tips :
-            - Claculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
+            - Calculator can be used through Keyboard (e.g; using numbers (1,2,3,4,5,6,7,8,9,0), division (/), multiplication (*), addition (+), subtraction (-) and results or equals to (=)).
             - For enabling the searchbar in youtube click '/' then type the search query.
+            - Notepad can be opened by :- clicking "windows + R" then typing "notepad" and then clicking "enter" button.
         6. Remember :
-            - Do not copy or select any text, because you are not allowed to select text rather than read_content then type_text.
+            - Do not copy or select any text, because you are not allowed to select text, rather than read_content then type_text.
+            - Always WAIT for an website to load before proceeding to the next step.
 
         Return a JSON array of steps with format:
         [
@@ -140,6 +145,62 @@ class CommanderAgent:
                 
         except Exception as e:
             print(f"Error in planning: {e}")
+            return []
+
+    def replan_task(self, user_prompt: str, failed_step: Step, remaining_steps: List[Step], current_screenshot: Image.Image) -> List[Step]:
+        """Generate a NEW recovery plan after a step fails"""
+        
+        # Convert remaining steps to JSON string so the AI knows what it hasn't done yet
+        remaining_steps_str = json.dumps([s.__dict__ for s in remaining_steps], indent=2)
+        
+        system_prompt = f"""You are an AI assistant controlling a Windows 11 PC. 
+        We are trying to complete this task: "{user_prompt}"
+        
+        PROBLEM: We just FAILED to execute this step:
+        - Description: {failed_step.description}
+        - Action Type: {failed_step.action_type}
+        - Parameters: {json.dumps(failed_step.parameters)}
+        
+        Look at the attached screenshot. The screen is currently in this state AFTER the failure.
+        These were the steps we HAD LEFT to do:
+        {remaining_steps_str}
+        
+        INSTRUCTIONS:
+        1. Look at the screenshot. Did the failure leave us in an unexpected state? (e.g., a popup, wrong window)
+        2. Do NOT just repeat the exact same failed step unless you are 100% sure it will work now.
+        3. Try an alternative approach (e.g., use a different keyboard shortcut, click somewhere else to close a popup first).
+        4. Generate a NEW JSON array of steps starting from recovering from this failure, all the way to finishing the original task.
+        
+        Return ONLY the JSON array of steps using the exact same format as before.
+        """
+        
+        try:
+            contents = [system_prompt]
+            img_byte_arr = BytesIO()
+            current_screenshot.save(img_byte_arr, format='PNG')
+            contents.append(
+                genai_types.Part.from_bytes(
+                    data=img_byte_arr.getvalue(),
+                    mime_type="image/png"
+                )
+            )
+
+            response = gemini_client.models.generate_content(
+                model=self.model,
+                contents=contents
+            )
+            
+            response_text = response.text
+            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if json_match:
+                steps_data = json.loads(json_match.group())
+                return [Step(**step) for step in steps_data]
+            else:
+                print(f"Could not parse RE-plan from response: {response_text}")
+                return []
+                
+        except Exception as e:
+            print(f"Error in RE-planning: {e}")
             return []
     
     def analyze_screenshot(self, screenshot: Image.Image, target_description: str) -> Dict[str, Any]:
@@ -438,19 +499,16 @@ class PCControlAgent:
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
-                print(f"Deleted screenshot: {filepath}")
                 if filepath in self.temp_screenshots:
                     self.temp_screenshots.remove(filepath)
         except Exception as e:
-            print(f"Warning: Could not delete {filepath}: {e}")
+            pass # Silent cleanup
     
     def cleanup_all_screenshots(self):
         """Delete all temporary screenshots"""
-        print("\nCleaning up temporary screenshots...")
         for filepath in self.temp_screenshots[:]:  # Create copy to iterate
             self.cleanup_screenshot(filepath)
         self.temp_screenshots.clear()
-        print("Screenshot cleanup complete.")
     
     def execute_keyboard_action(self, keys: List[str]) -> bool:
         """Execute a keyboard shortcut or key combination"""
@@ -564,11 +622,15 @@ class PCControlAgent:
             return False
     
     def execute_task(self, user_prompt: str) -> Dict[str, Any]:
-        """Main method to execute a complete task"""
+        """Main method to execute a complete task with Self-Healing Re-plan capability"""
         
         print(f"\n{'='*60}")
         print(f"Starting task: {user_prompt}")
         print(f"{'='*60}")
+        
+        # SAFETY CONFIG: Maximum times the AI is allowed to re-plan before giving up
+        MAX_REPLAN_ATTEMPTS = 3 
+        replan_count = 0
         
         # First, minimize all windows
         print("\nMinimizing all windows...")
@@ -588,25 +650,33 @@ class PCControlAgent:
         if not steps:
             print("Failed to generate plan")
             return {"success": False, "error": "Could not generate execution plan",
-                    "steps_completed": 0, "total_steps": 0, "step_results": []}
+                    "steps_completed": 0, "total_steps": 0, "step_results": [], "replans": 0}
         
         print(f"\nPlan generated with {len(steps)} steps:")
         for i, step in enumerate(steps, 1):
             print(f"  {i}. {step.description}")
         
-        # Execute steps
+        # Execute steps using a WHILE loop so we can dynamically swap steps if we re-plan
         results = {
             "success": True,
             "steps_completed": 0,
             "total_steps": len(steps),
-            "step_results": []
+            "step_results": [],
+            "replans": 0
         }
         
-        for i, step in enumerate(steps, 1):
-            print(f"\n[Step {i}/{len(steps)}]")
+        current_step_idx = 0
+        
+        while current_step_idx < len(steps):
+            step = steps[current_step_idx]
+            
+            # Update total steps display in case replanning added steps
+            results["total_steps"] = len(steps)
+            
+            print(f"\n[Step {current_step_idx + 1}/{len(steps)}]")
             
             # Take screenshot before each step
-            step_screenshot_path = f"step_{i}_before.png"
+            step_screenshot_path = f"step_{current_step_idx}_before.png"
             self.take_screenshot(step_screenshot_path)
             
             # Execute the step
@@ -616,7 +686,7 @@ class PCControlAgent:
             self.cleanup_screenshot(step_screenshot_path)
             
             results["step_results"].append({
-                "step": i,
+                "step": current_step_idx + 1,
                 "description": step.description,
                 "success": success,
                 "result": step.result
@@ -624,26 +694,66 @@ class PCControlAgent:
             
             if success:
                 results["steps_completed"] += 1
+                current_step_idx += 1  # Move to next step
             else:
-                print(f"Step {i} failed. Attempting to continue...")
-                # Optionally, we could try to recover here
+                print(f"\n❌ FAILURE DETECTED on: {step.description}")
+                
+                # CHECK SAFETY LIMIT
+                if replan_count >= MAX_REPLAN_ATTEMPTS:
+                    print(f"🛑 SAFETY LIMIT REACHED: Agent has re-planned {MAX_REPLAN_ATTEMPTS} times. Aborting task to prevent infinite loops.")
+                    results["success"] = False
+                    break
+                
+                print(f"🔄 Initiating Re-Plan ({replan_count + 1}/{MAX_REPLAN_ATTEMPTS})...")
+                replan_count += 1
+                results["replans"] = replan_count
+                time.sleep(1) # Give PC a second to settle after the error
+                
+                # Take fresh screenshot of the "broken" state
+                replan_screenshot_path = "replan_state.png"
+                current_state_screenshot = self.take_screenshot(replan_screenshot_path)
+                
+                # Get the steps that HAVEN'T been executed yet
+                remaining_steps = steps[current_step_idx:]
+                
+                # Ask AI to figure out what went wrong and create a new plan
+                print("Asking AI to analyze failure and generate recovery steps...")
+                new_recovery_steps = self.commander.replan_task(
+                    user_prompt=user_prompt,
+                    failed_step=step,
+                    remaining_steps=remaining_steps,
+                    current_screenshot=current_state_screenshot
+                )
+                
+                self.cleanup_screenshot(replan_screenshot_path)
+                
+                if new_recovery_steps:
+                    print(f"✅ Successfully generated {len(new_recovery_steps)} recovery steps!")
+                    for i, s in enumerate(new_recovery_steps, 1):
+                        print(f"  {i}. {s.description}")
+                    
+                    # MAGIC HAPPENS HERE: 
+                    # We keep the successful past steps, and replace everything from current index onwards with the new plan
+                    steps = steps[:current_step_idx] + new_recovery_steps
+                else:
+                    print("❌ AI failed to generate a recovery plan. Aborting task.")
+                    results["success"] = False
+                    break
             
             # Small delay between steps
             time.sleep(0.5)
-        
-        # Take final screenshot
-        final_screenshot_path = "final_state.png"
-        self.take_screenshot(final_screenshot_path)
-        
-        # Clean up final screenshot after a short delay (to allow viewing if needed)
-        time.sleep(1)
-        self.cleanup_screenshot(final_screenshot_path)
         
         # Final cleanup of any remaining screenshots
         self.cleanup_all_screenshots()
         
         print(f"\n{'='*60}")
-        print(f"Task completed: {results['steps_completed']}/{results['total_steps']} steps successful")
+        if results["success"]:
+             print(f"Task completed successfully!")
+        else:
+             print(f"Task aborted/failed.")
+             
+        print(f"Steps completed: {results['steps_completed']}/{results['total_steps']}")
+        print(f"Total Re-plans used: {results['replans']}")
         print(f"{'='*60}")
         
         return results
@@ -651,9 +761,10 @@ class PCControlAgent:
 def main():
     """Main function to run the PC Control Agent"""
     
-    print("PC Control AI Agent")
+    print("PC Control AI Agent (WITH SELF-HEALING RE-PLAN)")
     print("=" * 60)
     print("This agent can control your PC to complete tasks.")
+    print("If a step fails, it will look at the screen and try a new approach!")
     print("Type 'exit' to quit.")
     print("=" * 60)
     
@@ -664,7 +775,6 @@ def main():
     example_tasks = [
         "Open Chrome browser and search for 'what are allotropes of carbon' then write it in notepad",
         "Open calculator and calculate 25 * 37",
-        "Take a screenshot and save it to desktop",
         "Open notepad and write a short poem about computers"
     ]
     
@@ -701,8 +811,9 @@ def main():
                 print("TASK SUMMARY")
                 print("=" * 60)
                 print(f"Task: {user_input}")
-                print(f"Success: {results['success']}")
+                print(f"Final Status: {'SUCCESS' if results['success'] else 'FAILED/ABORTED'}")
                 print(f"Steps completed: {results['steps_completed']}/{results['total_steps']}")
+                print(f"Times AI had to Re-plan: {results.get('replans', 0)}")
                 
                 if results.get('step_results'):
                     print("\nStep Details:")
