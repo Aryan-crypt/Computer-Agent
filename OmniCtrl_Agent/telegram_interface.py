@@ -2,7 +2,8 @@
 Telegram Bot Interface for Remote PC Control
 Handles all communication between user and agent
 Enhanced with: Self-Reconnect, Rate Limiting, Voice Commands, Scheduled Tasks,
-               Aliases, File Transfer, System Monitoring, Clipboard Sync, Webcam Capture.
+               Aliases, File Transfer, System Monitoring, Clipboard Sync, Webcam Capture,
+               Notification Forwarding, Screen Streaming, PC Popup Dialogs, Mic Recording.
 """
 
 import os
@@ -20,6 +21,7 @@ import requests
 import pyperclip
 import psutil
 import cv2
+import pyautogui
 from pathlib import Path
 from collections import defaultdict
 
@@ -44,7 +46,7 @@ import google.genai as genai
 from google.genai import types as genai_types
 
 from OmniCtrl_Agent.config import *
-from main import PCControlAgent
+from Core.core_agent import PCControlAgent
 from API import *
 
 # Fallback for timeout config in case it's missing before config.py is updated
@@ -59,8 +61,85 @@ try:
 except NameError:
     DOWNLOADS_FOLDER = str(Path.home() / "Downloads")
 
+# Fallbacks for NEW feature configs (prevents errors if config.py isn't updated yet)
+try:
+    ENABLE_NOTIFICATION_FORWARDING
+except NameError:
+    ENABLE_NOTIFICATION_FORWARDING = False
+
+try:
+    SCREEN_STREAM_DURATION
+except NameError:
+    SCREEN_STREAM_DURATION = 10
+
+try:
+    SCREEN_STREAM_FPS
+except NameError:
+    SCREEN_STREAM_FPS = 10.0
+
+try:
+    MIC_RECORD_DURATION
+except NameError:
+    MIC_RECORD_DURATION = 10
+
+try:
+    MIC_SAMPLE_RATE
+except NameError:
+    MIC_SAMPLE_RATE = 44100
+
+# Check for Windows specific GUI hooking
+try:
+    import win32gui
+    HAS_WIN32GUI = True
+except ImportError:
+    HAS_WIN32GUI = False
+
 # Set up logging (Fix #15)
 logger = logging.getLogger(__name__)
+
+
+# ==========================================
+# FEATURE: Notification Forwarder (Win32)
+# ==========================================
+class NotificationListener:
+    """Polls for Windows Toast Notifications and forwards them."""
+    def __init__(self, callback):
+        self.callback = callback
+        self.seen_windows = set()
+        self.running = True
+        
+        if HAS_WIN32GUI:
+            self.thread = threading.Thread(target=self._poll, daemon=True)
+            self.thread.start()
+            logger.info("🔔 Notification Forwarding Listener Started.")
+        else:
+            logger.warning("win32gui missing, notification forwarding disabled.")
+
+    def _poll(self):
+        while self.running:
+            def enum_callback(hwnd, _):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    
+                    class_name = win32gui.GetClassName(hwnd)
+                    # Windows 11 Toast/Notification Classes
+                    if class_name in ["Windows.UI.Core.CoreWindow", "Xaml_WindowedPopupClass", "ToastDialog"]:
+                        title = win32gui.GetWindowText(hwnd)
+                        if title and title.strip() and hwnd not in self.seen_windows:
+                            self.seen_windows.add(hwnd)
+                            self.callback(title.strip())
+                except Exception:
+                    pass
+            
+            try:
+                win32gui.EnumWindows(enum_callback, None)
+                # Clean up handles of windows that have closed
+                self.seen_windows = {hwnd for hwnd in self.seen_windows if win32gui.IsWindow(hwnd)}
+            except Exception:
+                pass
+            
+            time.sleep(1.5) # Poll every 1.5 seconds to catch 5-second toasts reliably
 
 
 # ==========================================
@@ -109,7 +188,7 @@ class AliasManager:
         return self.aliases.get(key.lower().strip())
 
     def add(self, short: str, full: str) -> bool:
-        if len(short.split()) > 1: return False # Aliases must be single word/char
+        if len(short.split()) > 1: return False
         self.aliases[short.lower().strip()] = full.strip()
         self._save()
         return True
@@ -136,7 +215,6 @@ class TaskStatus(Enum):
 
 @dataclass
 class TaskRecord:
-    """Record of a completed/running task"""
     task_id: int
     command: str
     status: TaskStatus = TaskStatus.IDLE
@@ -150,8 +228,6 @@ class TaskRecord:
 
 
 class TaskHistory:
-    """Persistent task history storage"""
-    
     def __init__(self, filepath: str):
         self.filepath = filepath
         self.tasks: Dict[int, TaskRecord] = {}
@@ -241,6 +317,11 @@ class TelegramPCInterface:
         self.scheduler = AsyncIOScheduler()
         self.genai_stt_client = genai.Client(api_key=GEMINI_API_KEY)
         
+        # FEATURE: Notification Forwarding Init
+        self.notif_listener = None
+        if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
+            self.notif_listener = NotificationListener(self._forward_notification)
+        
         # Build application
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(self._post_init).build()
         self._register_handlers()
@@ -259,13 +340,18 @@ class TelegramPCInterface:
         self.application.add_handler(CommandHandler("history", self.cmd_history))
         self.application.add_handler(CommandHandler("clear", self.cmd_clear))
         
-        # FEATURE: New Commands
+        # FEATURE: Existing Commands
         self.application.add_handler(CommandHandler("alias", self.cmd_alias))
         self.application.add_handler(CommandHandler("sysinfo", self.cmd_sysinfo))
         self.application.add_handler(CommandHandler("clip", self.cmd_clip))
         self.application.add_handler(CommandHandler("webcam", self.cmd_webcam))
         self.application.add_handler(CommandHandler("getfile", self.cmd_getfile))
         self.application.add_handler(CommandHandler("schedule", self.cmd_schedule))
+        
+        # FEATURE: New Commands (Non-conflicting)
+        self.application.add_handler(CommandHandler("stream", self.cmd_stream))
+        self.application.add_handler(CommandHandler("popup", self.cmd_popup))
+        self.application.add_handler(CommandHandler("mic", self.cmd_mic))
         
         # FEATURE: Voice & File Handlers
         self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -285,7 +371,6 @@ class TelegramPCInterface:
         
         user_id = update.effective_user.id
         
-        # FEATURE: Rate Limiting Check
         if not self.rate_limiter.is_allowed(user_id):
             await update.message.reply_text("⚠️ **Rate Limit Exceeded**\nPlease wait a minute before sending more commands.", parse_mode="Markdown")
             return False
@@ -294,7 +379,143 @@ class TelegramPCInterface:
             await update.message.reply_text("⛔ **UNAUTHORIZED**", parse_mode="Markdown")
             return False
         return True
+
+    # ============ FEATURE: NOTIFICATION FORWARDING (PC -> PHONE) ============
     
+    def _forward_notification(self, text: str):
+        """Callback triggered by NotificationListener in a background thread."""
+        text = text[:500] # Prevent massive messages
+        msg = f"🔔 **PC Notification:**\n```\n{text}\n```"
+        self._send_safe(self._broadcast_to_admins(msg, parse_mode="Markdown"))
+        
+    async def _broadcast_to_admins(self, text: str, parse_mode: Optional[str] = None):
+        for uid in AUTHORIZED_USERS:
+            try:
+                await self.application.bot.send_message(chat_id=uid, text=text, parse_mode=parse_mode)
+            except Exception as e:
+                logger.error(f"Failed to broadcast notif to {uid}: {e}")
+
+    # ============ FEATURE: LIVE SCREEN STREAMING ============
+    
+    async def cmd_stream(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_auth(update): return
+        
+        await update.message.reply_text(f"🎥 Recording screen for {SCREEN_STREAM_DURATION} seconds...")
+        
+        try:
+            import numpy as np
+            from PIL import ImageGrab
+            
+            width, height = pyautogui.size()
+            filename = "screen_stream.mp4"
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(filename, fourcc, SCREEN_STREAM_FPS, (width, height))
+            
+            frames = int(SCREEN_STREAM_DURATION * SCREEN_STREAM_FPS)
+            for _ in range(frames):
+                # ImageGrab is much faster than pyautogui.screenshot for video
+                img = ImageGrab.grab(bbox=(0, 0, width, height))
+                frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                out.write(frame)
+                await asyncio.sleep(1.0 / SCREEN_STREAM_FPS) # Non-blocking sleep
+                
+            out.release()
+            
+            with open(filename, "rb") as video:
+                await update.message.reply_video(video, caption=f"🎥 Screen Stream ({SCREEN_STREAM_DURATION}s)")
+                
+            if os.path.exists(filename):
+                os.remove(filename)
+                
+        except Exception as e:
+            logger.error(f"Screen recording failed: {e}")
+            await update.message.reply_text(f"❌ Screen recording failed: {e}")
+
+    # ============ FEATURE: MESSAGING DIALOG BOX ============
+    
+    def _show_popup_thread(self, message: str):
+        """Spawns a native unclosable tkinter popup. Must run in its own thread."""
+        try:
+            import tkinter as tk
+            
+            root = tk.Tk()
+            root.attributes("-topmost", True)
+            root.overrideredirect(True) # Removes the X button and borders completely
+            
+            # Modern dark theme styling
+            frame = tk.Frame(root, bg="#2b2b2b", bd=0)
+            frame.pack(padx=0, pady=0, fill="both", expand=True)
+            
+            tk.Label(frame, text="📱 Telegram Message", font=("Segoe UI", 10, "bold"), bg="#2b2b2b", fg="#ffffff").pack(padx=20, pady=(15, 5), anchor="w")
+            tk.Label(frame, text=message, font=("Segoe UI", 11), bg="#2b2b2b", fg="#e0e0e0", wraplength=350, justify="left").pack(padx=20, pady=5, anchor="w")
+            
+            def on_ok():
+                root.destroy()
+                
+            btn_frame = tk.Frame(frame, bg="#2b2b2b")
+            btn_frame.pack(pady=(10, 15), padx=20, anchor="e")
+            tk.Button(btn_frame, text="OK", command=on_ok, width=8, bg="#0078d4", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2").pack()
+            
+            # Center on screen
+            root.update_idletasks()
+            w = root.winfo_width()
+            h = root.winfo_height()
+            x = (root.winfo_screenwidth() // 2) - (w // 2)
+            y = (root.winfo_screenheight() // 2) - (h // 2)
+            root.geometry(f'+{x}+{y}')
+            
+            root.mainloop()
+        except Exception as e:
+            logger.error(f"Failed to show popup (No active GUI session?): {e}")
+
+    async def cmd_popup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_auth(update): return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: `/popup <your message>`", parse_mode="Markdown")
+            return
+            
+        message = " ".join(context.args)
+        
+        threading.Thread(target=self._show_popup_thread, args=(message,), daemon=True).start()
+        await update.message.reply_text("💻 Popup shown on PC screen.")
+
+    # ============ FEATURE: MICROPHONE RECORDING ============
+    
+    async def cmd_mic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_auth(update): return
+        
+        await update.message.reply_text(f"🎙️ Recording microphone for {MIC_RECORD_DURATION} seconds...")
+        
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+            
+            filename = "mic_recording.wav"
+            fs = MIC_SAMPLE_RATE
+            seconds = MIC_RECORD_DURATION
+            
+            mydata = sd.rec(int(seconds * fs), samplerate=fs, channels=1)
+            
+            # Run waiting in executor so it doesn't block the asyncio event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, sd.wait)
+            
+            sf.write(filename, mydata, fs)
+            
+            with open(filename, "rb") as audio:
+                await update.message.reply_audio(audio, caption=f"🎙️ Mic Recording ({seconds}s)")
+                
+            if os.path.exists(filename):
+                os.remove(filename)
+                
+        except ImportError:
+            await update.message.reply_text("❌ Missing dependencies for Mic.\nPlease run: `pip install sounddevice soundfile`")
+        except Exception as e:
+            logger.error(f"Mic recording failed: {e}")
+            await update.message.reply_text(f"❌ Mic recording failed: {e}")
+
     # ============ FEATURE: VOICE COMMANDS ============
     
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -305,13 +526,10 @@ class TelegramPCInterface:
         try:
             voice = update.message.voice or update.message.audio
             file = await voice.get_file()
-            
-            # Download to memory
             file_bytes = await file.download_as_bytearray()
             
-            # Use Gemini for STT
             response = self.genai_stt_client.models.generate_content(
-                model="gemini-2.0-flash", # 2.0 flash is highly optimized for audio
+                model="gemini-2.0-flash", 
                 contents=[
                     genai_types.Part.from_bytes(data=bytes(file_bytes), mime_type="audio/ogg"),
                     "Transcribe this audio accurately into plain text. Only output the spoken words, nothing else."
@@ -339,8 +557,6 @@ class TelegramPCInterface:
         try:
             doc = update.message.document
             filename = doc.file_name
-            
-            # Sanitize filename to prevent path traversal
             safe_filename = os.path.basename(filename)
             save_path = os.path.join(DOWNLOADS_FOLDER, safe_filename)
             
@@ -362,7 +578,6 @@ class TelegramPCInterface:
         safe_filename = os.path.basename(filename)
         target_path = Path(DOWNLOADS_FOLDER) / safe_filename
         
-        # Security: Resolve path to prevent directory traversal
         try:
             target_path.resolve().relative_to(Path(DOWNLOADS_FOLDER).resolve())
         except ValueError:
@@ -381,8 +596,7 @@ class TelegramPCInterface:
     # ============ FEATURE: CUSTOM SHORTCUTS (ALIASES) ============
     
     async def cmd_alias(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self._check_auth(update):
-            return
+        if not await self._check_auth(update): return
         if not context.args:
             await update.message.reply_text("Usage:\n`/alias add <word> <full command>`\n`/alias del <word>`\n`/alias list`", parse_mode="Markdown")
             return
@@ -419,8 +633,7 @@ class TelegramPCInterface:
     # ============ FEATURE: SYSTEM MONITORING ============
     
     async def cmd_sysinfo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self._check_auth(update):
-            return
+        if not await self._check_auth(update): return
         
         def bar(percent, length=15):
             filled = int(percent / 100 * length)
@@ -441,11 +654,9 @@ class TelegramPCInterface:
     # ============ FEATURE: CLIPBOARD SYNC ============
     
     async def cmd_clip(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self._check_auth(update):
-            return
+        if not await self._check_auth(update): return
         
         if not context.args:
-            # Read clipboard
             try:
                 content = pyperclip.paste()
                 if content:
@@ -455,7 +666,6 @@ class TelegramPCInterface:
             except Exception as e:
                 await update.message.reply_text(f"❌ Failed to read clipboard: {e}")
         else:
-            # Set clipboard
             text = " ".join(context.args)
             try:
                 pyperclip.copy(text)
@@ -466,8 +676,7 @@ class TelegramPCInterface:
     # ============ FEATURE: WEBCAM CAPTURE ============
     
     async def cmd_webcam(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self._check_auth(update):
-            return
+        if not await self._check_auth(update): return
         
         await update.message.reply_text("📸 Accessing webcam...")
         try:
@@ -489,8 +698,7 @@ class TelegramPCInterface:
     # ============ FEATURE: SCHEDULED TASKS ============
     
     async def cmd_schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await self._check_auth(update):
-            return
+        if not await self._check_auth(update): return
         
         if not context.args or context.args[0].lower() == "list":
             jobs = self.scheduler.get_jobs()
@@ -507,18 +715,16 @@ class TelegramPCInterface:
             await update.message.reply_text("🗑️ All scheduled tasks cleared.")
             
         else:
-            # Expected: /schedule HH:MM <command>
             try:
                 time_str = context.args[0]
                 cmd = " ".join(context.args[1:])
                 
-                # Parse time
                 hour, minute = map(int, time_str.split(':'))
                 now = datetime.now()
                 run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 
                 if run_time < now:
-                    run_time += timedelta(days=1) # Schedule for tomorrow if time passed today
+                    run_time += timedelta(days=1) 
                     
                 chat_id = update.effective_chat.id
                 self.scheduler.add_job(
@@ -532,21 +738,20 @@ class TelegramPCInterface:
                 await update.message.reply_text("❌ Invalid format. Use: `/schedule HH:MM <your task>`")
 
     async def _execute_scheduled_task(self, command: str, chat_id: int):
-        """Triggered by APScheduler. Pushes directly to queue to avoid blocking and respect concurrency."""
         with self.lock:
             self.task_queue.put((command, chat_id))
-        # Trigger queue processor safely
         if self.main_loop and not self.main_loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._async_process_queue(), self.main_loop)
 
     async def _async_process_queue(self):
-        """Async wrapper to call _process_queue from scheduler thread"""
         self._process_queue()
 
     # ============ ORIGINAL COMMAND HANDLERS ============
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._check_auth(update): return
+        
+        notif_status = "ACTIVE 🔔" if self.notif_listener else "DISABLED"
         await update.message.reply_text(
             "🤖 **PC Control Agent - Remote Interface**\n\n"
             "💬 Text/Voice → Execute task\n"
@@ -554,7 +759,9 @@ class TelegramPCInterface:
             "⏰ `/schedule HH:MM <task>`\n"
             "🔗 `/alias add <word> <cmd>`\n"
             "📊 `/sysinfo` | 📋 `/clip` | 📸 `/webcam`\n"
-            "📂 `/getfile <name>` | 🖥️ `/screenshot`",
+            "📂 `/getfile <name>` | 🖥️ `/screenshot`\n"
+            "🎥 `/stream` | 🎙️ `/mic` | 💬 `/popup <msg>`\n\n"
+            f"🔔 Notification Forwarding: {notif_status}",
             parse_mode="Markdown"
         )
     
@@ -567,7 +774,7 @@ class TelegramPCInterface:
 • Text/Voice: Just say what you want
 • `/task <text>` - Explicit task execution
 
-**New Features:**
+**Utilities:**
 • `/sysinfo` - CPU/RAM/Disk monitor
 • `/clip` - Read clipboard
 • `/clip set <text>` - Write to clipboard
@@ -576,6 +783,11 @@ class TelegramPCInterface:
 • `/getfile <name>` - Retrieves from Downloads
 • `/alias add n open notepad` - Create shortcut
 • `/schedule 14:30 open chrome` - Schedule task
+
+**NEW Features:**
+• `/stream` - 10s screen recording video
+• `/mic` - 10s microphone audio recording
+• `/popup <message>` - Show unclosable popup on PC
 
 **Monitoring:**
 • `/status` - Current task status
@@ -598,12 +810,11 @@ class TelegramPCInterface:
         
         command = update.message.text.strip()
         
-        # FEATURE: Alias Expansion (Check BEFORE length check)
         expanded_cmd = self.alias_manager.get(command)
         if expanded_cmd:
             command = expanded_cmd
         elif len(command) < 3:
-            return # Ignore short non-alias messages
+            return 
             
         await self._process_command(command, update)
     
@@ -727,7 +938,7 @@ class TelegramPCInterface:
             with open("final_result.png", "rb") as photo:
                 await self._send_photo(chat_id, photo, caption="📸 Final screen state:")
             self.pc_agent.cleanup_screenshot("final_result.png")
-        except Exception as e:
+        except Exception:
             pass
     
     async def _send_message(self, chat_id: int, text: str, parse_mode: Optional[str] = None):
@@ -798,7 +1009,6 @@ class TelegramPCInterface:
         with self.lock:
             if self.is_busy:
                 self.stop_flag.set()
-                import pyautogui
                 pyautogui.moveTo(0, 0)
                 await update.message.reply_text("🛑 **EMERGENCY STOP ACTIVATED**", parse_mode="Markdown")
             else:
@@ -843,6 +1053,8 @@ class TelegramPCInterface:
 
     async def _shutdown_app(self):
         try:
+            if self.notif_listener:
+                self.notif_listener.running = False
             if self.scheduler.running:
                 self.scheduler.shutdown(wait=False)
             if self.application.updater.running:
@@ -859,6 +1071,7 @@ class TelegramPCInterface:
         print(f"🛡️ Autonomous Reconnect: ENABLED")
         print(f"🚦 Rate Limiting: ENABLED")
         print(f"⏰ Task Scheduler: ENABLED")
+        print(f"🔔 Notification Forwarding: {'ACTIVE' if self.notif_listener else 'DISABLED'}")
         print("=" * 60)
         
         retry_delay = 10
@@ -871,7 +1084,7 @@ class TelegramPCInterface:
                 print("🌐 Connecting to Telegram...")
                 loop.run_until_complete(self._bootstrap())
                 print("✅ Bot is running and polling.")
-                retry_delay = 10 # Reset on successful connection
+                retry_delay = 10 
                 loop.run_forever()
                 
             except KeyboardInterrupt:
@@ -890,13 +1103,12 @@ class TelegramPCInterface:
                     pass
                 loop.close()
 
-            # Sleep & Recovery Phase
             print("🔍 Checking internet connection...")
             while not self._check_internet():
                 print(f"⏳ No internet. Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
                 if retry_delay < 60:
-                    retry_delay += 10 # Exponential backoff up to 60s
+                    retry_delay += 10 
             
             print("🌐 Internet detected! Rebooting bot...")
-            time.sleep(2) # Brief pause to let connection stabilize
+            time.sleep(2) 

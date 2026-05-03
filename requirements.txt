@@ -27,5 +27,13 @@ python-telegram-bot
 # Task Scheduling
 APScheduler
 
+# ==========================================
+# NEW FEATURES: A/V & Screen Streaming
+# Required for /stream, /mic, and /popup
+# ==========================================
+numpy
+sounddevice
+soundfile
+
 # NOTE: pytesseract requires the Tesseract OCR engine to be installed on your system.
 # For Windows, download and install from: https://github.com/UB-Mannheim/tesseract/wiki

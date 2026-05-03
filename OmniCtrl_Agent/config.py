@@ -41,6 +41,17 @@ WINDOW_LOAD_DELAY_SECONDS = 1.0  # Delay to wait for windows/websites to load
 # ============ TASK EXECUTION CONFIG (Fix #7) ============
 TASK_TIMEOUT_SECONDS = 300  # Maximum time (in seconds) a task is allowed to run before timing out (5 minutes)
 
+# ============ FEATURE: NOTIFICATION FORWARDING CONFIG ============
+ENABLE_NOTIFICATION_FORWARDING = False  # Set to True to forward PC notifications to Telegram (Requires win32gui)
+
+# ============ FEATURE: LIVE SCREEN STREAMING CONFIG ============
+SCREEN_STREAM_DURATION = 10  # Duration of the screen recording in seconds
+SCREEN_STREAM_FPS = 10.0     # Frames per second for the screen recording (lower = smaller file size)
+
+# ============ FEATURE: MICROPHONE RECORDING CONFIG ============
+MIC_RECORD_DURATION = 10     # Duration of the microphone recording in seconds
+MIC_SAMPLE_RATE = 44100      # Audio sample rate (44100 is standard CD quality)
+
 # ============ LOGGING CONFIG ============
 SAVE_TASK_HISTORY = True
 TASK_HISTORY_FILE = "task_history.json"
