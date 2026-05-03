@@ -6,6 +6,8 @@
 
 Imagine having a personal assistant that can control your computer just by understanding your plain English commands. That's exactly what OmniCtrl does! Whether you're sitting at your desk or miles away from your computer, you can command it to do tasks for you through Telegram.
 
+<img src="https://img.shields.io/github/stars/Aryan-crypt/Computer-Agent?style=social">
+
 ## 🌟 What Makes OmniCtrl Special?
 
 - **🗣️ Understands Plain English**: Just say what you want, like "Open Chrome and search for cute cat videos"
