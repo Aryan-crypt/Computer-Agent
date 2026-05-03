@@ -1074,7 +1074,12 @@ class TelegramPCInterface:
         print(f"🛡️ Autonomous Reconnect: ENABLED")
         print(f"🚦 Rate Limiting: ENABLED")
         print(f"⏰ Task Scheduler: ENABLED")
-        print(f"🔔 Notification Forwarding: {'ACTIVE' if self.notif_listener else 'DISABLED'}")
+        if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
+            print(f"🔔 Notification Forwarding: ACTIVE")
+        elif not HAS_WIN32GUI:
+            print(f"🔔 Notification Forwarding: DISABLED (pywin32 missing)")
+        else:
+            print(f"🔔 Notification Forwarding: DISABLED (in config)")
         print("=" * 60)
         
         retry_delay = 10
