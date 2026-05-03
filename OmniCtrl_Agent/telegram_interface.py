@@ -318,9 +318,8 @@ class TelegramPCInterface:
         self.genai_stt_client = genai.Client(api_key=GEMINI_API_KEY)
         
         # FEATURE: Notification Forwarding Init
+        # Delaying listener start to _post_init so the event loop is ready
         self.notif_listener = None
-        if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
-            self.notif_listener = NotificationListener(self._forward_notification)
         
         # Build application
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(self._post_init).build()
@@ -329,6 +328,10 @@ class TelegramPCInterface:
     async def _post_init(self, application: Application) -> None:
         self.main_loop = asyncio.get_running_loop()
         logger.info("Main event loop captured for thread-safe messaging")
+        
+        # Start Notification Forwarding safely now that the loop is active
+        if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
+            self.notif_listener = NotificationListener(self._forward_notification)
 
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.jpg" alt="Project Logo" width="350"/>
+</p>
+
 # 🤖 OmniCtrl - Your Personal AI PC Assistant
 
 Imagine having a personal assistant that can control your computer just by understanding your plain English commands. That's exactly what OmniCtrl does! Whether you're sitting at your desk or miles away from your computer, you can command it to do tasks for you through Telegram.

@@ -42,7 +42,7 @@ WINDOW_LOAD_DELAY_SECONDS = 1.0  # Delay to wait for windows/websites to load
 TASK_TIMEOUT_SECONDS = 300  # Maximum time (in seconds) a task is allowed to run before timing out (5 minutes)
 
 # ============ FEATURE: NOTIFICATION FORWARDING CONFIG ============
-ENABLE_NOTIFICATION_FORWARDING = False  # Set to True to forward PC notifications to Telegram (Requires win32gui)
+ENABLE_NOTIFICATION_FORWARDING = True  # Set to True to forward PC notifications to Telegram (Requires win32gui)
 
 # ============ FEATURE: LIVE SCREEN STREAMING CONFIG ============
 SCREEN_STREAM_DURATION = 10  # Duration of the screen recording in seconds
