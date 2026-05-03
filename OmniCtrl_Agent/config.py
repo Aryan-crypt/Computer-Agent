@@ -2,10 +2,31 @@
 Configuration for Remote PC Control Agent
 """
 
+import os
+from pathlib import Path
+
 # ============ SECURITY CONFIG ============
 REQUIRE_CONFIRMATION = True  # Ask "Proceed? (y/n)" before executing
 ALLOW_SCREENSHOT_COMMAND = True  # Allow /screenshot to see your screen
 EMERGENCY_STOP_ENABLED = True  # Allow /stop to abort tasks
+
+# ============ FEATURE: RATE LIMITING CONFIG ============
+RATE_LIMIT_MAX_REQUESTS = 10  # Max commands allowed per user within the time window
+RATE_LIMIT_WINDOW_SECONDS = 60  # Time window in seconds for rate limiting
+
+# ============ FEATURE: FILE TRANSFER CONFIG ============
+# Automatically resolves the active Windows user's Downloads folder
+DOWNLOADS_FOLDER = str(Path.home() / "Downloads")
+
+# ============ FEATURE: WEBCAM CONFIG ============
+WEBCAM_INDEX = 0  # Default camera index (0 is usually the built-in laptop webcam)
+
+# ============ FEATURE: CUSTOM SHORTCUTS CONFIG ============
+ALIAS_FILE = "aliases.json"  # File to store custom aliases persistently
+
+# ============ FEATURE: SELF-RECONNECTION CONFIG ============
+RECONNECT_BASE_DELAY = 10  # Initial wait time (seconds) after internet drops
+RECONNECT_MAX_DELAY = 60   # Maximum wait time (seconds) during exponential backoff
 
 # ============ AGENT CONFIG ============
 MAX_REPLAN_ATTEMPTS = 3

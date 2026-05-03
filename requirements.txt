@@ -10,11 +10,22 @@ pywin32
 # Image Processing and OCR
 Pillow
 pytesseract
+opencv-python
+
+# System & Hardware Access
+psutil
+pyperclip
 
 # AI Model Clients
 google-genai
 gradio-client
 requests
+
+# Telegram Bot Engine
+python-telegram-bot
+
+# Task Scheduling
+APScheduler
 
 # NOTE: pytesseract requires the Tesseract OCR engine to be installed on your system.
 # For Windows, download and install from: https://github.com/UB-Mannheim/tesseract/wiki
