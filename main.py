@@ -11,29 +11,37 @@ import time
 import json
 import base64
 import re
+import uuid
+import logging
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
-import threading
-import queue
-from DataBase.shortcuts import WINDOWS_SHORTCUTS
+from io import BytesIO
 
 # Core libraries
 import pyautogui
-from PIL import Image, ImageDraw
+import pyperclip
+from PIL import Image
 import pytesseract
-import keyboard
-import mouse
-import win32gui
-import win32con
-from io import BytesIO
 
 # AI Model libraries
 import google.genai as genai
 from google.genai import types as genai_types
 import requests
-import urllib.parse
+
+from DataBase.shortcuts import WINDOWS_SHORTCUTS
 from API import *
+
+# Import timing and limit configurations
+from OmniCtrl_Agent.config import (
+    MAX_REPLAN_ATTEMPTS, 
+    ACTION_DELAY_SECONDS, 
+    CLICK_DELAY_SECONDS, 
+    WINDOW_LOAD_DELAY_SECONDS
+)
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Configure pyautogui for safety
 pyautogui.FAILSAFE = True
@@ -74,6 +82,35 @@ class CommanderAgent:
         self.model = "gemini-3-flash-preview"
         self.shortcuts_knowledge = json.dumps(WINDOWS_SHORTCUTS, indent=2)
         
+    def _validate_step(self, step_data: dict) -> Optional[Step]:
+        """Validate and sanitize a step from AI response (Fix #10)"""
+        try:
+            action_type = step_data.get("action_type", "")
+            valid_types = ["keyboard", "mouse_click", "type_text", "read_content", "wait", "mouse_scroll"]
+            
+            if action_type not in valid_types:
+                logger.warning(f"Invalid action type: {action_type}, defaulting to 'wait'")
+                action_type = "wait"
+            
+            params = step_data.get("parameters", {})
+            if action_type == "keyboard" and "keys" not in params:
+                params["keys"] = []
+            elif action_type == "mouse_click" and "target" not in params:
+                params["target"] = step_data.get("description", "unknown")
+            elif action_type == "type_text" and "text" not in params:
+                params["text"] = ""
+            elif action_type == "wait" and "duration" not in params:
+                params["duration"] = WINDOW_LOAD_DELAY_SECONDS
+            
+            return Step(
+                description=step_data.get("description", "Unknown step"),
+                action_type=action_type,
+                parameters=params
+            )
+        except Exception as e:
+            logger.error(f"Failed to validate step: {e}")
+            return None
+
     def plan_task(self, user_prompt: str, current_screenshot: Optional[Image.Image] = None) -> List[Step]:
         """Generate a plan for completing the user's task"""
         
@@ -138,19 +175,19 @@ class CommanderAgent:
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 steps_data = json.loads(json_match.group())
-                return [Step(**step) for step in steps_data]
+                steps = [self._validate_step(step) for step in steps_data]
+                return [s for s in steps if s is not None]
             else:
-                print(f"Could not parse plan from response: {response_text}")
+                logger.error(f"Could not parse plan from response: {response_text}")
                 return []
                 
         except Exception as e:
-            print(f"Error in planning: {e}")
+            logger.error(f"Error in planning: {e}")
             return []
 
     def replan_task(self, user_prompt: str, failed_step: Step, remaining_steps: List[Step], current_screenshot: Image.Image) -> List[Step]:
         """Generate a NEW recovery plan after a step fails"""
         
-        # Convert remaining steps to JSON string so the AI knows what it hasn't done yet
         remaining_steps_str = json.dumps([s.__dict__ for s in remaining_steps], indent=2)
         
         system_prompt = f"""You are an AI assistant controlling a Windows 11 PC. 
@@ -194,13 +231,14 @@ class CommanderAgent:
             json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
             if json_match:
                 steps_data = json.loads(json_match.group())
-                return [Step(**step) for step in steps_data]
+                steps = [self._validate_step(step) for step in steps_data]
+                return [s for s in steps if s is not None]
             else:
-                print(f"Could not parse RE-plan from response: {response_text}")
+                logger.error(f"Could not parse RE-plan from response: {response_text}")
                 return []
                 
         except Exception as e:
-            print(f"Error in RE-planning: {e}")
+            logger.error(f"Error in RE-planning: {e}")
             return []
     
     def analyze_screenshot(self, screenshot: Image.Image, target_description: str) -> Dict[str, Any]:
@@ -245,7 +283,7 @@ class CommanderAgent:
                 return {"target_found": False}
                 
         except Exception as e:
-            print(f"Error analyzing screenshot: {e}")
+            logger.error(f"Error analyzing screenshot: {e}")
             return {"target_found": False}
 
 class CoordinateExtractor:
@@ -295,9 +333,8 @@ class CoordinateExtractor:
 
             response.raise_for_status()
             text_response = response.json()["choices"][0]["message"]["content"]
-            print(f"[DEBUG] Gemma 4 coordinate response: {text_response}")
+            logger.debug(f"Gemma 4 coordinate response: {text_response}")
 
-            # Parse coordinates — try JSON first, fallback to regex
             try:
                 obj = json.loads(text_response)
                 ymin, xmin, ymax, xmax = [float(obj[k]) for k in ("ymin", "xmin", "ymax", "xmax")]
@@ -308,18 +345,17 @@ class CoordinateExtractor:
                 else:
                     raise ValueError("Could not find 4 coordinates in response.")
 
-            # Convert 0-1000 scale to actual screen pixels
             center_x_norm = (xmin + xmax) / 2
             center_y_norm = (ymin + ymax) / 2
             pixel_x = int((center_x_norm / 1000) * width)
             pixel_y = int((center_y_norm / 1000) * height)
 
-            print(f"Target found at: ({pixel_x}, {pixel_y})")
+            logger.info(f"Target found at: ({pixel_x}, {pixel_y})")
             return (pixel_x, pixel_y)
 
         except Exception as e:
-            print(f"Error extracting coordinates with Gemma 4 (OpenRouter): {e}")
-            print("Trying Gemini 3 Flash as backup for coordinate extraction...")
+            logger.error(f"Error extracting coordinates with Gemma 4 (OpenRouter): {e}")
+            logger.info("Trying Gemini 3 Flash as backup for coordinate extraction...")
             return self._gemini_fallback_extraction(screenshot_path, target_description)
 
     def _gemini_fallback_extraction(self, screenshot_path: str, target_description: str) -> Optional[Tuple[int, int]]:
@@ -341,7 +377,7 @@ class CoordinateExtractor:
                 ]
             )
             text_response = response.text
-            print(f"[DEBUG] Gemini 3 Flash coordinate response: {text_response}")
+            logger.debug(f"Gemini 3 Flash coordinate response: {text_response}")
 
             numbers = re.findall(r"(\d+(?:\.\d+)?)", text_response)
             if len(numbers) >= 4:
@@ -350,22 +386,23 @@ class CoordinateExtractor:
                 center_y_norm = (ymin + ymax) / 2
                 pixel_x = int((center_x_norm / 1000) * width)
                 pixel_y = int((center_y_norm / 1000) * height)
-                print(f"[Gemini Fallback] Target found at: ({pixel_x}, {pixel_y})")
+                logger.info(f"[Gemini Fallback] Target found at: ({pixel_x}, {pixel_y})")
                 return (pixel_x, pixel_y)
             else:
                 raise ValueError(f"Could not find 4 coordinates in Gemini response: {text_response}")
 
         except Exception as e:
-            print(f"Error extracting coordinates with Gemini 3 Flash: {e}")
+            logger.error(f"Error extracting coordinates with Gemini 3 Flash: {e}")
             return self._center_fallback(screenshot_path)
 
     def _center_fallback(self, screenshot_path: str) -> Optional[Tuple[int, int]]:
         """Last resort: return center of screen"""
         try:
             img = Image.open(screenshot_path)
-            print("[Fallback] Using center of screen as coordinate.")
+            logger.warning("[Fallback] Using center of screen as coordinate.")
             return (img.width // 2, img.height // 2)
-        except:
+        except Exception as e:
+            logger.error(f"Center fallback failed: {e}")
             return None
 
 class ContentProcessor:
@@ -432,12 +469,12 @@ class ContentProcessor:
         try:
             return self._call_gemma4(messages, max_tokens=1000)
         except Exception as e:
-            print(f"Error reading content with Gemma 4 (OpenRouter): {e}")
-            print("Trying Gemini 3 Flash as backup for content reading...")
+            logger.error(f"Error reading content with Gemma 4 (OpenRouter): {e}")
+            logger.info("Trying Gemini 3 Flash as backup for content reading...")
             try:
                 return self._call_gemini_flash(instruction, screenshot)
             except Exception as e2:
-                print(f"Error reading content with Gemini 3 Flash: {e2}")
+                logger.error(f"Error reading content with Gemini 3 Flash: {e2}")
                 return self._ocr_fallback(screenshot)
 
     def _ocr_fallback(self, screenshot: Image.Image) -> str:
@@ -446,7 +483,7 @@ class ContentProcessor:
             text = pytesseract.image_to_string(screenshot)
             return text.strip()
         except Exception as e:
-            print(f"OCR fallback failed: {e}")
+            logger.error(f"OCR fallback failed: {e}")
             return ""
     
     def generate_text(self, prompt: str) -> str:
@@ -455,12 +492,12 @@ class ContentProcessor:
         try:
             return self._call_gemma4(messages, max_tokens=500)
         except Exception as e:
-            print(f"Error generating text with Gemma 4 (OpenRouter): {e}")
-            print("Trying Gemini 3 Flash as backup for text generation...")
+            logger.error(f"Error generating text with Gemma 4 (OpenRouter): {e}")
+            logger.info("Trying Gemini 3 Flash as backup for text generation...")
             try:
                 return self._call_gemini_flash(prompt)
             except Exception as e2:
-                print(f"Error generating text with Gemini 3 Flash: {e2}")
+                logger.error(f"Error generating text with Gemini 3 Flash: {e2}")
                 return ""
 
 class PCControlAgent:
@@ -474,9 +511,13 @@ class PCControlAgent:
         self.screenshot_history = []
         self.temp_screenshots = []  # Track temporary screenshot files
         
-        # Set up pyautogui settings
+        # Set up pyautogui settings (Fix #3 preparation: kept True, disabled temporarily in interface)
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.5
+        
+    def _generate_temp_path(self, prefix: str = "screenshot") -> str:
+        """Generate unique temp filename to avoid conflicts (Fix #11)"""
+        return f"{prefix}_{uuid.uuid4().hex[:8]}.png"
         
     def take_screenshot(self, save_path: Optional[str] = None) -> Image.Image:
         """Take a screenshot of the entire screen"""
@@ -486,9 +527,8 @@ class PCControlAgent:
         
         if save_path:
             screenshot.save(save_path)
-            self.temp_screenshots.append(save_path)  # Track file for cleanup
+            self.temp_screenshots.append(save_path)
             
-        # Keep only last 10 screenshots in memory
         if len(self.screenshot_history) > 10:
             self.screenshot_history.pop(0)
             
@@ -502,11 +542,11 @@ class PCControlAgent:
                 if filepath in self.temp_screenshots:
                     self.temp_screenshots.remove(filepath)
         except Exception as e:
-            pass # Silent cleanup
+            logger.warning(f"Silent cleanup failed for {filepath}: {e}")
     
     def cleanup_all_screenshots(self):
         """Delete all temporary screenshots"""
-        for filepath in self.temp_screenshots[:]:  # Create copy to iterate
+        for filepath in self.temp_screenshots[:]:
             self.cleanup_screenshot(filepath)
         self.temp_screenshots.clear()
     
@@ -517,46 +557,53 @@ class PCControlAgent:
                 pyautogui.press(keys[0])
             else:
                 pyautogui.hotkey(*keys)
-            time.sleep(0.5)
+            time.sleep(ACTION_DELAY_SECONDS)  # Fix #14
             return True
         except Exception as e:
-            print(f"Error executing keyboard action {keys}: {e}")
+            logger.error(f"Error executing keyboard action {keys}: {e}")
             return False
     
     def execute_mouse_click(self, x: int, y: int, button: str = 'left') -> bool:
         """Execute a mouse click at specified coordinates"""
         try:
             pyautogui.click(x, y, button=button)
-            time.sleep(0.3)
+            time.sleep(CLICK_DELAY_SECONDS)  # Fix #14
             return True
         except Exception as e:
-            print(f"Error executing mouse click at ({x}, {y}): {e}")
+            logger.error(f"Error executing mouse click at ({x}, {y}): {e}")
             return False
     
     def execute_mouse_scroll(self, amount: int) -> bool:
         """Execute mouse scroll"""
         try:
             pyautogui.scroll(amount)
-            time.sleep(0.3)
+            time.sleep(CLICK_DELAY_SECONDS)  # Fix #14
             return True
         except Exception as e:
-            print(f"Error executing scroll: {e}")
+            logger.error(f"Error executing scroll: {e}")
             return False
     
     def type_text(self, text: str, interval: float = 0.05) -> bool:
-        """Type text with specified interval between keystrokes"""
+        """Type text with specified interval, using clipboard for non-ASCII (Fix #8)"""
         try:
-            pyautogui.typewrite(text, interval=interval)
-            time.sleep(0.3)
+            if text.isascii():
+                pyautogui.typewrite(text, interval=interval)
+            else:
+                original_clipboard = pyperclip.paste()
+                pyperclip.copy(text)
+                pyautogui.hotkey('ctrl', 'v')
+                time.sleep(0.1)
+                pyperclip.copy(original_clipboard)
+            time.sleep(CLICK_DELAY_SECONDS)  # Fix #14
             return True
         except Exception as e:
-            print(f"Error typing text: {e}")
+            logger.error(f"Error typing text: {e}")
             return False
     
     def execute_step(self, step: Step) -> bool:
         """Execute a single step in the plan"""
         
-        print(f"\nExecuting step: {step.description}")
+        logger.info(f"Executing step: {step.description}")
         
         temp_screenshot_path = None
         
@@ -566,26 +613,22 @@ class PCControlAgent:
                 success = self.execute_keyboard_action(keys)
                 
             elif step.action_type == "mouse_click":
-                # Take screenshot and find coordinates
-                temp_screenshot_path = "temp_screenshot.png"
+                temp_screenshot_path = self._generate_temp_path("click")  # Fix #11
                 screenshot = self.take_screenshot(temp_screenshot_path)
                 target = step.parameters.get("target", "")
                 
-                # Try to extract coordinates
                 coords = self.coordinate_extractor.extract_coordinates(temp_screenshot_path, target)
                 
                 if coords:
                     success = self.execute_mouse_click(coords[0], coords[1])
                 else:
-                    print(f"Could not find coordinates for: {target}")
-                    # Try alternative approach with Commander analysis
+                    logger.warning(f"Could not find coordinates for: {target}")
                     analysis = self.commander.analyze_screenshot(screenshot, target)
                     if analysis.get("use_keyboard") and analysis.get("keyboard_shortcut"):
                         success = self.execute_keyboard_action(analysis["keyboard_shortcut"])
                     else:
                         success = False
                 
-                # Clean up temp screenshot immediately after use
                 if temp_screenshot_path:
                     self.cleanup_screenshot(temp_screenshot_path)
                         
@@ -598,24 +641,23 @@ class PCControlAgent:
                 instruction = step.parameters.get("instruction", "Read all text from screen")
                 content = self.content_processor.read_content(screenshot, instruction)
                 step.result = content
-                print(f"Read content: {content[:200]}...")
+                logger.info(f"Read content: {content[:200]}...")
                 success = True
                 
             elif step.action_type == "wait":
-                duration = step.parameters.get("duration", 1.0)
+                duration = step.parameters.get("duration", WINDOW_LOAD_DELAY_SECONDS)
                 time.sleep(duration)
                 success = True
                 
             else:
-                print(f"Unknown action type: {step.action_type}")
+                logger.error(f"Unknown action type: {step.action_type}")
                 success = False
                 
             step.completed = success
             return success
             
         except Exception as e:
-            print(f"Error executing step: {e}")
-            # Clean up on error
+            logger.error(f"Error executing step: {e}")
             if temp_screenshot_path:
                 self.cleanup_screenshot(temp_screenshot_path)
             step.completed = False
@@ -624,39 +666,34 @@ class PCControlAgent:
     def execute_task(self, user_prompt: str) -> Dict[str, Any]:
         """Main method to execute a complete task with Self-Healing Re-plan capability"""
         
-        print(f"\n{'='*60}")
-        print(f"Starting task: {user_prompt}")
-        print(f"{'='*60}")
+        logger.info(f"{'='*60}")
+        logger.info(f"Starting task: {user_prompt}")
+        logger.info(f"{'='*60}")
         
-        # SAFETY CONFIG: Maximum times the AI is allowed to re-plan before giving up
-        MAX_REPLAN_ATTEMPTS = 3 
+        # Fix #4: Removed hardcoded MAX_REPLAN_ATTEMPTS = 3, now imported from config
         replan_count = 0
         
-        # First, minimize all windows
-        print("\nMinimizing all windows...")
+        logger.info("Minimizing all windows...")
         self.execute_keyboard_action(["win", "m"])
-        time.sleep(1)
+        time.sleep(WINDOW_LOAD_DELAY_SECONDS)  # Fix #14
         
-        # Take initial screenshot
-        initial_screenshot = self.take_screenshot("initial_state.png")
+        initial_screenshot_path = self._generate_temp_path("initial_state")  # Fix #11
+        initial_screenshot = self.take_screenshot(initial_screenshot_path)
         
-        # Generate plan
-        print("\nGenerating execution plan...")
+        logger.info("Generating execution plan...")
         steps = self.commander.plan_task(user_prompt, initial_screenshot)
         
-        # Clean up initial screenshot after plan is generated
-        self.cleanup_screenshot("initial_state.png")
+        self.cleanup_screenshot(initial_screenshot_path)
         
         if not steps:
-            print("Failed to generate plan")
+            logger.error("Failed to generate plan")
             return {"success": False, "error": "Could not generate execution plan",
                     "steps_completed": 0, "total_steps": 0, "step_results": [], "replans": 0}
         
-        print(f"\nPlan generated with {len(steps)} steps:")
+        logger.info(f"Plan generated with {len(steps)} steps:")
         for i, step in enumerate(steps, 1):
-            print(f"  {i}. {step.description}")
+            logger.info(f"  {i}. {step.description}")
         
-        # Execute steps using a WHILE loop so we can dynamically swap steps if we re-plan
         results = {
             "success": True,
             "steps_completed": 0,
@@ -669,20 +706,15 @@ class PCControlAgent:
         
         while current_step_idx < len(steps):
             step = steps[current_step_idx]
-            
-            # Update total steps display in case replanning added steps
             results["total_steps"] = len(steps)
             
-            print(f"\n[Step {current_step_idx + 1}/{len(steps)}]")
+            logger.info(f"[Step {current_step_idx + 1}/{len(steps)}]")
             
-            # Take screenshot before each step
-            step_screenshot_path = f"step_{current_step_idx}_before.png"
+            step_screenshot_path = self._generate_temp_path(f"step_{current_step_idx}_before")  # Fix #11
             self.take_screenshot(step_screenshot_path)
             
-            # Execute the step
             success = self.execute_step(step)
             
-            # Clean up step screenshot after execution
             self.cleanup_screenshot(step_screenshot_path)
             
             results["step_results"].append({
@@ -694,30 +726,26 @@ class PCControlAgent:
             
             if success:
                 results["steps_completed"] += 1
-                current_step_idx += 1  # Move to next step
+                current_step_idx += 1
             else:
-                print(f"\n❌ FAILURE DETECTED on: {step.description}")
+                logger.error(f"FAILURE DETECTED on: {step.description}")
                 
-                # CHECK SAFETY LIMIT
                 if replan_count >= MAX_REPLAN_ATTEMPTS:
-                    print(f"🛑 SAFETY LIMIT REACHED: Agent has re-planned {MAX_REPLAN_ATTEMPTS} times. Aborting task to prevent infinite loops.")
+                    logger.error(f"SAFETY LIMIT REACHED: Agent has re-planned {MAX_REPLAN_ATTEMPTS} times. Aborting task.")
                     results["success"] = False
                     break
                 
-                print(f"🔄 Initiating Re-Plan ({replan_count + 1}/{MAX_REPLAN_ATTEMPTS})...")
+                logger.info(f"Initiating Re-Plan ({replan_count + 1}/{MAX_REPLAN_ATTEMPTS})...")
                 replan_count += 1
                 results["replans"] = replan_count
-                time.sleep(1) # Give PC a second to settle after the error
+                time.sleep(WINDOW_LOAD_DELAY_SECONDS) 
                 
-                # Take fresh screenshot of the "broken" state
-                replan_screenshot_path = "replan_state.png"
+                replan_screenshot_path = self._generate_temp_path("replan_state")  # Fix #11
                 current_state_screenshot = self.take_screenshot(replan_screenshot_path)
                 
-                # Get the steps that HAVEN'T been executed yet
                 remaining_steps = steps[current_step_idx:]
                 
-                # Ask AI to figure out what went wrong and create a new plan
-                print("Asking AI to analyze failure and generate recovery steps...")
+                logger.info("Asking AI to analyze failure and generate recovery steps...")
                 new_recovery_steps = self.commander.replan_task(
                     user_prompt=user_prompt,
                     failed_step=step,
@@ -728,59 +756,56 @@ class PCControlAgent:
                 self.cleanup_screenshot(replan_screenshot_path)
                 
                 if new_recovery_steps:
-                    print(f"✅ Successfully generated {len(new_recovery_steps)} recovery steps!")
+                    logger.info(f"Successfully generated {len(new_recovery_steps)} recovery steps!")
                     for i, s in enumerate(new_recovery_steps, 1):
-                        print(f"  {i}. {s.description}")
+                        logger.info(f"  {i}. {s.description}")
                     
-                    # MAGIC HAPPENS HERE: 
-                    # We keep the successful past steps, and replace everything from current index onwards with the new plan
                     steps = steps[:current_step_idx] + new_recovery_steps
                 else:
-                    print("❌ AI failed to generate a recovery plan. Aborting task.")
+                    logger.error("AI failed to generate a recovery plan. Aborting task.")
                     results["success"] = False
                     break
             
-            # Small delay between steps
-            time.sleep(0.5)
+            time.sleep(ACTION_DELAY_SECONDS)  # Fix #14
         
-        # Final cleanup of any remaining screenshots
         self.cleanup_all_screenshots()
         
-        print(f"\n{'='*60}")
         if results["success"]:
-             print(f"Task completed successfully!")
+             logger.info(f"Task completed successfully!")
         else:
-             print(f"Task aborted/failed.")
+             logger.info(f"Task aborted/failed.")
              
-        print(f"Steps completed: {results['steps_completed']}/{results['total_steps']}")
-        print(f"Total Re-plans used: {results['replans']}")
-        print(f"{'='*60}")
+        logger.info(f"Steps completed: {results['steps_completed']}/{results['total_steps']}")
+        logger.info(f"Total Re-plans used: {results['replans']}")
         
         return results
 
 def main():
     """Main function to run the PC Control Agent"""
     
-    print("PC Control AI Agent (WITH SELF-HEALING RE-PLAN)")
-    print("=" * 60)
-    print("This agent can control your PC to complete tasks.")
-    print("If a step fails, it will look at the screen and try a new approach!")
-    print("Type 'exit' to quit.")
-    print("=" * 60)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
-    # Initialize the agent
+    logger.info("PC Control AI Agent (WITH SELF-HEALING RE-PLAN)")
+    logger.info("=" * 60)
+    logger.info("This agent can control your PC to complete tasks.")
+    logger.info("If a step fails, it will look at the screen and try a new approach!")
+    logger.info("Type 'exit' to quit.")
+    logger.info("=" * 60)
+    
     agent = PCControlAgent()
     
-    # Example tasks
     example_tasks = [
         "Open Chrome browser and search for 'what are allotropes of carbon' then write it in notepad",
         "Open calculator and calculate 25 * 37",
         "Open notepad and write a short poem about computers"
     ]
     
-    print("\nExample tasks you can try:")
+    logger.info("Example tasks you can try:")
     for i, task in enumerate(example_tasks, 1):
-        print(f"  {i}. {task}")
+        logger.info(f"  {i}. {task}")
     
     try:
         while True:
@@ -788,13 +813,12 @@ def main():
             user_input = input("Enter your task (or 'exit' to quit): ").strip()
             
             if user_input.lower() == 'exit':
-                print("Exiting PC Control Agent. Goodbye!")
+                logger.info("Exiting PC Control Agent. Goodbye!")
                 break
             
             if not user_input:
                 continue
             
-            # Safety confirmation
             print(f"\nYou want me to: {user_input}")
             confirm = input("Proceed? (y/n): ").strip().lower()
             
@@ -803,10 +827,8 @@ def main():
                 continue
             
             try:
-                # Execute the task
                 results = agent.execute_task(user_input)
                 
-                # Print summary
                 print("\n" + "=" * 60)
                 print("TASK SUMMARY")
                 print("=" * 60)
@@ -825,18 +847,15 @@ def main():
                 
             except KeyboardInterrupt:
                 print("\nTask interrupted by user.")
-                # Clean up on interrupt
                 agent.cleanup_all_screenshots()
             except Exception as e:
                 print(f"\nError during task execution: {e}")
                 import traceback
                 traceback.print_exc()
-                # Clean up on error
                 agent.cleanup_all_screenshots()
     
     finally:
-        # Final cleanup when exiting the program
-        print("\nPerforming final cleanup...")
+        logger.info("Performing final cleanup...")
         agent.cleanup_all_screenshots()
 
 if __name__ == "__main__":

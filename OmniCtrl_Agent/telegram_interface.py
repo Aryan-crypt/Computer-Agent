@@ -7,6 +7,7 @@ import os
 import json
 import time
 import asyncio
+import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
@@ -29,9 +30,18 @@ from telegram.ext import (
     ContextTypes
 )
 
-from config import *
+from OmniCtrl_Agent.config import *
 from main import PCControlAgent
 from API import *
+
+# Fallback for timeout config in case it's missing before config.py is updated
+try:
+    TASK_TIMEOUT_SECONDS
+except NameError:
+    TASK_TIMEOUT_SECONDS = 300
+
+# Set up logging (Fix #15)
+logger = logging.getLogger(__name__)
 
 
 class TaskStatus(Enum):
@@ -88,7 +98,7 @@ class TaskHistory:
                         )
                     self._next_id = data.get("next_id", len(self.tasks) + 1)
             except Exception as e:
-                print(f"Error loading task history: {e}")
+                logger.error(f"Error loading task history: {e}")
     
     def _save(self):
         """Save history to file"""
@@ -114,7 +124,7 @@ class TaskHistory:
             with open(self.filepath, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"Error saving task history: {e}")
+            logger.error(f"Error saving task history: {e}")
     
     def create_task(self, command: str) -> TaskRecord:
         """Create a new task record"""
@@ -165,9 +175,14 @@ class TelegramPCInterface:
         # Main event loop reference (for thread-safe messaging)
         self.main_loop = None
         
-        # Build application
-        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        # Build application with post_init hook (Fix #12)
+        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(self._post_init).build()
         self._register_handlers()
+    
+    async def _post_init(self, application: Application) -> None:
+        """Called when application is initialized to safely capture event loop (Fix #12)"""
+        self.main_loop = asyncio.get_running_loop()
+        logger.info("Main event loop captured for thread-safe messaging")
     
     def _register_handlers(self):
         """Register all command and message handlers"""
@@ -197,7 +212,7 @@ class TelegramPCInterface:
     
     async def _check_auth(self, update: Update) -> bool:
         """Check authorization and send error if not"""
-        # CRITICAL: Capture the main event loop for thread-safe calls from ANY entry point
+        # Fallback loop capture just in case (Fix #12)
         if not self.main_loop:
             self.main_loop = asyncio.get_running_loop()
         
@@ -217,10 +232,6 @@ class TelegramPCInterface:
         """Handle /start command"""
         if not await self._check_auth(update):
             return
-        
-        # CRITICAL: Capture the main event loop for thread-safe calls
-        if not self.main_loop:
-            self.main_loop = asyncio.get_running_loop()
         
         await update.message.reply_text(
             "🤖 **PC Control Agent - Remote Interface**\n\n"
@@ -391,14 +402,35 @@ class TelegramPCInterface:
         )
         self.worker_thread.start()
     
+    def _handle_task_timeout(self, chat_id: int, task_id: int):
+        """Handle task timeout by setting stop flag and notifying user (Fix #7)"""
+        with self.lock:
+            if self.is_busy and self.current_task and self.current_task.task_id == task_id:
+                self.stop_flag.set()
+                logger.warning(f"Task #{task_id} timed out after {TASK_TIMEOUT_SECONDS} seconds.")
+                self._send_safe(self._send_message(
+                    chat_id,
+                    f"⏰ **TASK TIMEOUT**\n\nTask #{task_id} exceeded {TASK_TIMEOUT_SECONDS}s limit and will be forcefully stopped.",
+                    parse_mode="Markdown"
+                ))
+
     def _execute_task_thread(self, command: str, chat_id: int, task_id: int):
         """Execute task in background thread"""
+        
+        # Setup timeout mechanism (Fix #7)
+        timeout_timer = threading.Timer(
+            TASK_TIMEOUT_SECONDS, 
+            self._handle_task_timeout, 
+            args=[chat_id, task_id]
+        )
+        timeout_timer.daemon = True
+        timeout_timer.start()
         
         try:
             # Execute the task
             results = self.pc_agent.execute_task(command)
             
-            # Check if stopped
+            # Check if stopped (Fix #3: gracefully catch FailSafeException thrown by moveTo(0,0))
             if self.stop_flag.is_set():
                 self.current_task.status = TaskStatus.STOPPED
                 self.current_task.completed_at = datetime.now().isoformat()
@@ -440,6 +472,7 @@ class TelegramPCInterface:
             ))
         
         finally:
+            timeout_timer.cancel()  # Cancel timer if task finishes normally
             with self.lock:
                 self.is_busy = False
                 self.current_task = None
@@ -494,8 +527,8 @@ class TelegramPCInterface:
         except Exception as e:
             await self._send_message(chat_id, f"⚠️ Could not send screenshot: {e}")
     
-    async def _send_message(self, chat_id: int, text: str, parse_mode: str = None):
-        """Thread-safe message sending"""
+    async def _send_message(self, chat_id: int, text: str, parse_mode: Optional[str] = None):
+        """Thread-safe message sending (Fix #13)"""
         try:
             await self.application.bot.send_message(
                 chat_id=chat_id,
@@ -503,10 +536,10 @@ class TelegramPCInterface:
                 parse_mode=parse_mode
             )
         except Exception as e:
-            print(f"Error sending message: {e}")
+            logger.error(f"Error sending message: {e}")
     
-    async def _send_photo(self, chat_id: int, photo, caption: str = None):
-        """Thread-safe photo sending"""
+    async def _send_photo(self, chat_id: int, photo: Any, caption: Optional[str] = None):
+        """Thread-safe photo sending (Fix #13)"""
         try:
             await self.application.bot.send_photo(
                 chat_id=chat_id,
@@ -514,23 +547,39 @@ class TelegramPCInterface:
                 caption=caption
             )
         except Exception as e:
-            print(f"Error sending photo: {e}")
+            logger.error(f"Error sending photo: {e}")
 
     def _send_safe(self, coro):
-        """Safely run async code from a background thread"""
+        """Safely run async code from a background thread (Fix #5)"""
         if self.main_loop and not self.main_loop.is_closed():
-            asyncio.run_coroutine_threadsafe(coro, self.main_loop)
+            future = asyncio.run_coroutine_threadsafe(coro, self.main_loop)
+            future.add_done_callback(lambda fut: fut.result() if not fut.exception() else logger.error(f"Failed to send Telegram message: {fut.exception()}"))
         else:
-            print("Warning: Event loop not available, cannot send Telegram message.")
+            logger.error("Event loop not available, message dropped!")
     
     def _process_queue(self):
-        """Process next task in queue if any"""
-        try:
-            if not self.task_queue.empty():
+        """Process next task in queue if any (Fix #6)"""
+        while not self.task_queue.empty():
+            try:
                 command, chat_id = self.task_queue.get_nowait()
+                
+                # Re-check if still busy (race condition protection)
+                with self.lock:
+                    if self.is_busy:
+                        self.task_queue.put((command, chat_id))  # Put back
+                        break
+                
                 self._send_safe(self._start_task(command, chat_id))
-        except queue.Empty:
-            pass
+                break  # Only start one task at a time
+                
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error(f"Failed to process queued task: {e}")
+                self._send_safe(self._send_message(
+                    chat_id,
+                    f"❌ Failed to start queued task: {e}"
+                ))
     
     # ============ MONITORING COMMANDS ============
     
@@ -602,7 +651,9 @@ class TelegramPCInterface:
         with self.lock:
             if self.is_busy:
                 self.stop_flag.set()
-                # Move mouse to corner to trigger pyautogui failsafe
+                # Move mouse to corner to trigger pyautogui failsafe (Fix #3)
+                # This intentionally raises FailSafeException in the worker thread, 
+                # which is caught gracefully to stop the task immediately.
                 import pyautogui
                 pyautogui.moveTo(0, 0)
                 
@@ -697,11 +748,3 @@ class TelegramPCInterface:
         )
 
 
-def main():
-    """Entry point"""
-    bot = TelegramPCInterface()
-    bot.run()
-
-
-if __name__ == "__main__":
-    main()
