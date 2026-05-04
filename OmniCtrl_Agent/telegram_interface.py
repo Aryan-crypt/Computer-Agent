@@ -31,6 +31,8 @@ from telegram import (
     InlineKeyboardButton, 
     InlineKeyboardMarkup,
 )
+from telegram.error import TimedOut
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -321,8 +323,14 @@ class TelegramPCInterface:
         # Delaying listener start to _post_init so the event loop is ready
         self.notif_listener = None
         
-        # Build application
-        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(self._post_init).build()
+        # FEATURE: Interactive File Browser State
+        # Stores user_id -> {"path": str, "items": [(name, is_dir), ...]}
+        self.file_browser_state: Dict[int, Dict[str, Any]] = {}
+        
+        # Build application with INCREASED TIMEOUTS to prevent ReadTimeout on slow networks
+        # Default is 5s which is too low for file uploads in some regions
+        request = HTTPXRequest(connect_timeout=15.0, read_timeout=60.0, write_timeout=60.0, pool_timeout=10.0)
+        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(self._post_init).build()
         self._register_handlers()
     
     async def _post_init(self, application: Application) -> None:
@@ -362,7 +370,21 @@ class TelegramPCInterface:
         
         self.application.add_handler(CallbackQueryHandler(self.callback_handler))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
+        
+        # FEATURE: Global Error Handler to suppress giant tracebacks on network hiccups
+        self.application.add_error_handler(self.global_error_handler)
+
+    # ============ GLOBAL ERROR HANDLER ============
     
+    async def global_error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Catches unhandled exceptions (like random network timeouts) to keep terminal clean."""
+        error = context.error
+        if isinstance(error, TimedOut):
+            # Silently absorb network timeouts to prevent console spam
+            logger.debug("Silenced a network timeout.")
+        else:
+            logger.error(f"Unhandled Exception: {type(error).__name__} - {error}")
+
     # ============ AUTHORIZATION & RATE LIMITING ============
     
     def _is_authorized(self, user_id: int) -> bool:
@@ -570,31 +592,550 @@ class TelegramPCInterface:
         except Exception as e:
             await update.message.reply_text(f"❌ Failed to save file: {e}")
 
+    # ============ FEATURE: INTERACTIVE FILE BROWSER ============
+    
     async def cmd_getfile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Interactive file browser - shows Downloads folder with navigation buttons"""
         if not await self._check_auth(update):
             return
-        if not context.args:
-            await update.message.reply_text("Usage: `/getfile <filename>`\nGets file from your Downloads folder.", parse_mode="Markdown")
+        
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        # Check if Downloads folder exists
+        downloads_path = Path(DOWNLOADS_FOLDER)
+        if not downloads_path.exists():
+            await update.message.reply_text(f"❌ Downloads folder not found:\n`{DOWNLOADS_FOLDER}`", parse_mode="Markdown")
             return
         
-        filename = " ".join(context.args)
-        safe_filename = os.path.basename(filename)
-        target_path = Path(DOWNLOADS_FOLDER) / safe_filename
+        if not downloads_path.is_dir():
+            await update.message.reply_text(f"❌ Downloads path is not a folder:\n`{DOWNLOADS_FOLDER}`", parse_mode="Markdown")
+            return
+        
+        # Initialize file browser state for this user
+        self.file_browser_state[user_id] = {
+            "path": str(downloads_path.resolve()),
+            "items": []
+        }
+        
+        # Show directory contents
+        await self._show_directory_contents(chat_id, user_id)
+    
+    async def _show_directory_contents(self, chat_id: int, user_id: int, edit_message=None):
+        """Display directory contents with interactive buttons"""
+        if user_id not in self.file_browser_state:
+            msg = "❌ Session expired. Use /getfile again."
+            if edit_message:
+                try:
+                    await edit_message.edit_text(msg)
+                except:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+            else:
+                await self.application.bot.send_message(chat_id=chat_id, text=msg)
+            return
+        
+        state = self.file_browser_state[user_id]
+        current_path = Path(state["path"])
+        downloads_root = Path(DOWNLOADS_FOLDER).resolve()
         
         try:
-            target_path.resolve().relative_to(Path(DOWNLOADS_FOLDER).resolve())
-        except ValueError:
-            await update.message.reply_text("⛔ Access denied: Invalid file path.")
-            return
+            # Verify path still exists and is within Downloads
+            if not current_path.exists() or not current_path.is_dir():
+                msg = "❌ Directory no longer exists or is not accessible."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg)
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                return
             
-        if target_path.is_file():
+            # Security check: ensure we're still within Downloads folder
             try:
-                with open(target_path, "rb") as f:
-                    await update.message.reply_document(f, caption=f"📂 {safe_filename}")
-            except Exception as e:
-                await update.message.reply_text(f"❌ Failed to send file: {e}")
-        else:
-            await update.message.reply_text(f"❌ File `{safe_filename}` not found in Downloads.")
+                current_path.resolve().relative_to(downloads_root)
+            except ValueError:
+                msg = "❌ Access denied: Path is outside Downloads folder."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg)
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                # Reset to Downloads root
+                state["path"] = str(downloads_root)
+                return
+            
+            # Get directory contents
+            try:
+                items = list(current_path.iterdir())
+            except PermissionError:
+                msg = "❌ Permission denied: Cannot access this folder."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg)
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                return
+            
+            # Filter out hidden files/folders (starting with .)
+            items = [item for item in items if not item.name.startswith('.')]
+            
+            # Sort: folders first, then files, alphabetically (like Windows Explorer)
+            folders = []
+            files = []
+            for item in items:
+                try:
+                    if item.is_dir():
+                        folders.append(item)
+                    elif item.is_file():
+                        files.append(item)
+                except (PermissionError, OSError):
+                    # Skip items we can't access
+                    continue
+            
+            folders.sort(key=lambda x: x.name.lower())
+            files.sort(key=lambda x: x.name.lower())
+            
+            # Combine and store items with their types
+            all_items = [(f.name, True) for f in folders] + [(f.name, False) for f in files]
+            state["items"] = all_items
+            
+            # Limit items to prevent huge keyboards (Telegram has limits)
+            MAX_ITEMS = 30
+            truncated = len(all_items) > MAX_ITEMS
+            display_items = all_items[:MAX_ITEMS]
+            
+            # Build buttons
+            buttons = []
+            
+            if not display_items:
+                # Empty directory - still show navigation buttons
+                display_path = self._get_display_path(current_path, downloads_root)
+                msg = f"📂 **{display_path}**\n\n📁 Empty folder"
+                
+                nav_buttons = [
+                    InlineKeyboardButton("🔙 Back", callback_data="fb_back"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="fb_cancel")
+                ]
+                buttons.append(nav_buttons)
+                
+                reply_markup = InlineKeyboardMarkup(buttons)
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="Markdown")
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="Markdown")
+                return
+            
+            # Add folder buttons
+            for idx, (name, is_dir) in enumerate(display_items):
+                if is_dir:
+                    button_text = f"📁 {name}"
+                    buttons.append([InlineKeyboardButton(button_text, callback_data=f"fb_nav:{idx}")])
+            
+            # Add file buttons with size info
+            for idx, (name, is_dir) in enumerate(display_items):
+                if not is_dir:
+                    file_path = current_path / name
+                    try:
+                        size = file_path.stat().st_size
+                        size_str = self._format_file_size(size)
+                    except (OSError, PermissionError):
+                        size_str = "N/A"
+                    
+                    # Truncate long file names for button display
+                    display_name = name
+                    max_name_length = 32
+                    if len(display_name) > max_name_length:
+                        name_part, ext = os.path.splitext(display_name)
+                        if ext:
+                            truncated_name = name_part[:max_name_length - len(ext) - 3] + "..." + ext
+                        else:
+                            truncated_name = display_name[:max_name_length - 3] + "..."
+                        display_name = truncated_name
+                    
+                    button_text = f"📄 {display_name} ({size_str})"
+                    buttons.append([InlineKeyboardButton(button_text, callback_data=f"fb_get:{idx}")])
+            
+            # Add navigation buttons at the bottom
+            nav_buttons = []
+            
+            # "Get Folder" button - always available to zip current folder
+            nav_buttons.append(InlineKeyboardButton("📦 Get Folder", callback_data="fb_zip"))
+            
+            # "Back" button
+            nav_buttons.append(InlineKeyboardButton("🔙 Back", callback_data="fb_back"))
+            
+            # "Cancel" button
+            nav_buttons.append(InlineKeyboardButton("❌ Cancel", callback_data="fb_cancel"))
+            
+            buttons.append(nav_buttons)
+            
+            # Build message
+            display_path = self._get_display_path(current_path, downloads_root)
+            folder_count = len(folders)
+            file_count = len(files)
+            msg = f"📂 **{display_path}**\n\n📁 {folder_count} folder(s) | 📄 {file_count} file(s)"
+            
+            if truncated:
+                msg += f"\n\n⚠️ Showing first {MAX_ITEMS} items only"
+            
+            reply_markup = InlineKeyboardMarkup(buttons)
+            
+            if edit_message:
+                try:
+                    await edit_message.edit_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+                except:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="Markdown")
+            else:
+                await self.application.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="Markdown")
+                
+        except Exception as e:
+            logger.error(f"Error showing directory contents: {e}")
+            msg = f"❌ Error reading directory: {str(e)[:150]}"
+            if edit_message:
+                try:
+                    await edit_message.edit_text(msg)
+                except:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+            else:
+                await self.application.bot.send_message(chat_id=chat_id, text=msg)
+    
+    def _get_display_path(self, path: Path, downloads_root: Path) -> str:
+        """Get display path relative to Downloads folder"""
+        try:
+            resolved = path.resolve()
+            rel = resolved.relative_to(downloads_root)
+            if str(rel) == ".":
+                return "Downloads"
+            return str(rel)
+        except ValueError:
+            return path.name
+    
+    def _format_file_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format"""
+        if size_bytes == 0:
+            return "0 B"
+        
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024:
+                if unit == 'B':
+                    return f"{int(size_bytes)} {unit}"
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} PB"
+    
+    async def _handle_file_browser_callback(self, query, user_id: int):
+        """Handle all file browser callback queries"""
+        chat_id = query.message.chat_id
+        data = query.data
+        
+        # Handle Cancel
+        if data == "fb_cancel":
+            if user_id in self.file_browser_state:
+                del self.file_browser_state[user_id]
+            try:
+                await query.edit_message_text("❌ File browser closed.")
+            except:
+                pass
+            return
+        
+        # Check if user has an active file browser session
+        if user_id not in self.file_browser_state:
+            try:
+                await query.edit_message_text("❌ Session expired. Use /getfile again.")
+            except:
+                pass
+            return
+        
+        state = self.file_browser_state[user_id]
+        current_path = Path(state["path"])
+        downloads_root = Path(DOWNLOADS_FOLDER).resolve()
+        
+        # Handle Back
+        if data == "fb_back":
+            parent = current_path.parent
+            
+            # Don't go above Downloads folder
+            if parent.resolve() >= downloads_root and parent.resolve() != current_path.resolve():
+                state["path"] = str(parent.resolve())
+                await self._show_directory_contents(chat_id, user_id, query.message)
+            elif current_path.resolve() == downloads_root:
+                # Already at root, just refresh
+                await self._show_directory_contents(chat_id, user_id, query.message)
+            else:
+                # Somehow outside Downloads, reset to root
+                state["path"] = str(downloads_root)
+                await self._show_directory_contents(chat_id, user_id, query.message)
+            return
+        
+        # Handle Get Folder (ZIP)
+        if data == "fb_zip":
+            await self._zip_and_send_folder(chat_id, str(current_path), query.message, user_id)
+            return
+        
+        # Handle Navigate to folder
+        if data.startswith("fb_nav:"):
+            try:
+                idx = int(data[7:])
+            except ValueError:
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            
+            items = state.get("items", [])
+            if idx < len(items):
+                name, is_dir = items[idx]
+                if is_dir:
+                    new_path = current_path / name
+                    if new_path.is_dir():
+                        # Security check before navigating
+                        try:
+                            new_path.resolve().relative_to(downloads_root)
+                            state["path"] = str(new_path.resolve())
+                            await self._show_directory_contents(chat_id, user_id, query.message)
+                        except ValueError:
+                            try:
+                                await query.edit_message_text("❌ Cannot access: Outside Downloads folder.")
+                            except:
+                                pass
+                    else:
+                        try:
+                            await query.edit_message_text("❌ Folder not found or is not accessible.")
+                        except:
+                            pass
+                else:
+                    try:
+                        await query.edit_message_text("❌ Not a folder.")
+                    except:
+                        pass
+            else:
+                try:
+                    await query.edit_message_text("❌ Invalid selection.")
+                except:
+                    pass
+            return
+        
+        # Handle Get File
+        if data.startswith("fb_get:"):
+            try:
+                idx = int(data[7:])
+            except ValueError:
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            
+            items = state.get("items", [])
+            if idx < len(items):
+                name, is_dir = items[idx]
+                if not is_dir:
+                    file_path = current_path / name
+                    if file_path.is_file():
+                        await self._send_file_to_user(chat_id, str(file_path), name, query.message)
+                    else:
+                        try:
+                            await query.edit_message_text("❌ File not found or is not accessible.")
+                        except:
+                            pass
+                else:
+                    try:
+                        await query.edit_message_text("❌ This is a folder. Click to navigate into it.")
+                    except:
+                        pass
+            else:
+                try:
+                    await query.edit_message_text("❌ Invalid selection.")
+                except:
+                    pass
+            return
+    
+    async def _send_file_to_user(self, chat_id: int, file_path: str, filename: str, edit_message):
+        """Send a single file to the user"""
+        try:
+            # Check file size (Telegram limit is 50MB for bots)
+            file_size = os.path.getsize(file_path)
+            max_size = 50 * 1024 * 1024  # 50MB
+            
+            if file_size > max_size:
+                msg = f"❌ File too large ({self._format_file_size(file_size)}).\nTelegram bot limit is 50MB."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg)
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                return
+            
+            # Update message to show sending status
+            if edit_message:
+                try:
+                    await edit_message.edit_text(f"📤 Sending `{filename}`...", parse_mode="Markdown")
+                except:
+                    pass
+            
+            # Send the file
+            with open(file_path, "rb") as f:
+                await self.application.bot.send_document(
+                    chat_id=chat_id, 
+                    document=f, 
+                    caption=f"📄 {filename} ({self._format_file_size(file_size)})"
+                )
+            
+            # Delete the status message after successful send
+            if edit_message:
+                try:
+                    await edit_message.delete()
+                except:
+                    pass
+                    
+        except TimedOut:
+            # On slow networks, the upload succeeds on Telegram's end but times out locally.
+            # We catch it and tell the user it's uploading instead of crashing.
+            logger.warning(f"Network timeout triggered for {filename}, but file likely reached Telegram.")
+            try:
+                if edit_message:
+                    await edit_message.edit_text(f"⏳ Network slow. `{filename}` is uploading and will appear shortly.", parse_mode="Markdown")
+            except:
+                pass
+        except Exception as e:
+            logger.error(f"Error sending file: {e}")
+            error_msg = f"❌ Failed to send file: {str(e)[:100]}"
+            if edit_message:
+                try:
+                    await edit_message.edit_text(error_msg)
+                except:
+                    pass
+    
+    async def _zip_and_send_folder(self, chat_id: int, folder_path: str, edit_message, user_id: int):
+        """Zip a folder and send it to the user"""
+        import zipfile
+        import tempfile
+        
+        folder = Path(folder_path)
+        folder_name = folder.name
+        zip_path = None
+        
+        try:
+            # Update message to show zipping status
+            if edit_message:
+                try:
+                    await edit_message.edit_text(f"📦 Zipping `{folder_name}`...\n⏳ Please wait...", parse_mode="Markdown")
+                except:
+                    pass
+            
+            # Count files to be zipped (excluding hidden files)
+            files_to_zip = []
+            for file_path in folder.rglob('*'):
+                if not file_path.name.startswith('.') and file_path.is_file():
+                    try:
+                        files_to_zip.append(file_path)
+                    except (PermissionError, OSError):
+                        continue
+            
+            if not files_to_zip:
+                msg = f"❌ Folder `{folder_name}` is empty or contains no accessible files."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg, parse_mode="Markdown")
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                return
+            
+            # Create zip file in temp directory to avoid permission issues
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp:
+                zip_path = tmp.name
+            
+            # Create the zip file
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in files_to_zip:
+                    try:
+                        arcname = file_path.relative_to(folder)
+                        zipf.write(file_path, arcname)
+                    except (PermissionError, OSError) as e:
+                        logger.warning(f"Skipping file {file_path}: {e}")
+                        continue
+            
+            # Check zip file size
+            zip_size = os.path.getsize(zip_path)
+            max_size = 50 * 1024 * 1024  # 50MB
+            
+            if zip_size > max_size:
+                os.remove(zip_path)
+                zip_path = None
+                msg = f"❌ Zipped folder too large ({self._format_file_size(zip_size)}).\nTelegram bot limit is 50MB."
+                if edit_message:
+                    try:
+                        await edit_message.edit_text(msg)
+                    except:
+                        await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                else:
+                    await self.application.bot.send_message(chat_id=chat_id, text=msg)
+                return
+            
+            # Update message to show sending status
+            if edit_message:
+                try:
+                    await edit_message.edit_text(f"📤 Sending `{folder_name}.zip`...", parse_mode="Markdown")
+                except:
+                    pass
+            
+            # Send the zip file
+            with open(zip_path, "rb") as f:
+                await self.application.bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    caption=f"📦 {folder_name}.zip ({len(files_to_zip)} files, {self._format_file_size(zip_size)})"
+                )
+            
+            # Clean up zip file
+            if zip_path and os.path.exists(zip_path):
+                os.remove(zip_path)
+            
+            # Delete the status message after successful send
+            if edit_message:
+                try:
+                    await edit_message.delete()
+                except:
+                    pass
+                    
+        except TimedOut:
+            # Handle slow network zip uploads gracefully
+            logger.warning(f"Network timeout triggered for {folder_name}.zip, but file likely reached Telegram.")
+            try:
+                if edit_message:
+                    await edit_message.edit_text(f"⏳ Network slow. `{folder_name}.zip` is uploading and will appear shortly.", parse_mode="Markdown")
+            except:
+                pass
+        except PermissionError as e:
+            logger.error(f"Permission error zipping folder: {e}")
+            msg = f"❌ Permission denied: Cannot access some files in the folder."
+            if edit_message:
+                try:
+                    await edit_message.edit_text(msg)
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Error zipping folder: {e}")
+            error_msg = f"❌ Failed to zip folder: {str(e)[:100]}"
+            if edit_message:
+                try:
+                    await edit_message.edit_text(error_msg)
+                except:
+                    pass
+        finally:
+            # Clean up temp file if it still exists
+            if zip_path and os.path.exists(zip_path):
+                try:
+                    os.remove(zip_path)
+                except:
+                    pass
 
     # ============ FEATURE: CUSTOM SHORTCUTS (ALIASES) ============
     
@@ -759,11 +1300,12 @@ class TelegramPCInterface:
             "🤖 **PC Control Agent - Remote Interface**\n\n"
             "💬 Text/Voice → Execute task\n"
             "📂 Send File → Save to Downloads\n"
+            "📂 `/getfile` → Browse & download files\n"
             "⏰ `/schedule HH:MM <task>`\n"
             "🔗 `/alias add <word> <cmd>`\n"
             "📊 `/sysinfo` | 📋 `/clip` | 📸 `/webcam`\n"
-            "📂 `/getfile <name>` | 🖥️ `/screenshot`\n"
-            "🎥 `/stream` | 🎙️ `/mic` | 💬 `/popup <msg>`\n\n"
+            "🖥️ `/screenshot` | 🎥 `/stream`\n"
+            "🎙️ `/mic` | 💬 `/popup <msg>`\n\n"
             f"🔔 Notification Forwarding: {notif_status}",
             parse_mode="Markdown"
         )
@@ -777,20 +1319,27 @@ class TelegramPCInterface:
 • Text/Voice: Just say what you want
 • `/task <text>` - Explicit task execution
 
+**File Management:**
+• Send File - Saves to Downloads
+• `/getfile` - Interactive file browser with buttons
+  • 📁 Click folder to navigate
+  • 📄 Click file to download
+  • 📦 Get Folder - Zip & download folder
+  • 🔙 Back - Go to parent folder
+  • ❌ Cancel - Close browser
+
 **Utilities:**
 • `/sysinfo` - CPU/RAM/Disk monitor
 • `/clip` - Read clipboard
 • `/clip set <text>` - Write to clipboard
 • `/webcam` - Take photo
-• Send File - Saves to Downloads
-• `/getfile <name>` - Retrieves from Downloads
 • `/alias add n open notepad` - Create shortcut
 • `/schedule 14:30 open chrome` - Schedule task
 
-**NEW Features:**
+**Media:**
 • `/stream` - 10s screen recording video
 • `/mic` - 10s microphone audio recording
-• `/popup <message>` - Show unclosable popup on PC
+• `/popup <message>` - Show popup on PC
 
 **Monitoring:**
 • `/status` - Current task status
@@ -844,19 +1393,44 @@ class TelegramPCInterface:
     
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
-        chat_id = query.message.chat_id
         
-        if query.data == "confirm_yes":
+        # Safely answer callback query to prevent it from crashing the button flow on slow networks
+        try:
+            await query.answer()
+        except TimedOut:
+            pass
+        except Exception:
+            pass
+            
+        chat_id = query.message.chat_id
+        user_id = query.from_user.id
+        data = query.data
+        
+        # Handle file browser callbacks (prefix: fb_)
+        if data.startswith("fb_"):
+            await self._handle_file_browser_callback(query, user_id)
+            return
+        
+        # Handle task confirmation callbacks
+        if data == "confirm_yes":
             command = self.pending_commands.pop(chat_id, None)
             if command:
-                await query.edit_message_text(f"✅ **Confirmed!**\nStarting: `{command[:50]}...`", parse_mode="Markdown")
+                try:
+                    await query.edit_message_text(f"✅ **Confirmed!**\nStarting: `{command[:50]}...`", parse_mode="Markdown")
+                except:
+                    pass
                 await self._start_task(command, chat_id)
             else:
-                await query.edit_message_text("❌ Command expired.")
-        elif query.data == "confirm_no":
+                try:
+                    await query.edit_message_text("❌ Command expired.")
+                except:
+                    pass
+        elif data == "confirm_no":
             self.pending_commands.pop(chat_id, None)
-            await query.edit_message_text("❌ Task cancelled.")
+            try:
+                await query.edit_message_text("❌ Task cancelled.")
+            except:
+                pass
     
     async def _start_task(self, command: str, chat_id: int):
         with self.lock:
@@ -1074,6 +1648,8 @@ class TelegramPCInterface:
         print(f"🛡️ Autonomous Reconnect: ENABLED")
         print(f"🚦 Rate Limiting: ENABLED")
         print(f"⏰ Task Scheduler: ENABLED")
+        print(f"📂 Interactive File Browser: ENABLED")
+        print(f"⏱️ Network Timeouts: Increased (60s) for slow networks")
         if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
             print(f"🔔 Notification Forwarding: ACTIVE")
         elif not HAS_WIN32GUI:
@@ -1119,4 +1695,4 @@ class TelegramPCInterface:
                     retry_delay += 10 
             
             print("🌐 Internet detected! Rebooting bot...")
-            time.sleep(2) 
+            time.sleep(2)
