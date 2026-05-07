@@ -41,6 +41,7 @@ Before you begin, make sure you have:
 - An internet connection
 - At least 2GB of free RAM
 - A Telegram account on your phone
+- [Git] (https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe) installed in windows
 
 ## 🔧 Installation Guide (Step-by-Step for Beginners)
 
