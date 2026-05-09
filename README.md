@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="logo.jpg" alt="Project Logo" width="350"/>
-</p>
-
 # 🤖 OmniCtrl - Your Personal AI PC Assistant
 
 Imagine having a personal assistant that can control your computer just by understanding your plain English commands. That's exactly what OmniCtrl does! Whether you're sitting at your desk or miles away from your computer, you can command it to do tasks for you through Telegram.
@@ -19,6 +15,7 @@ Imagine having a personal assistant that can control your computer just by under
 - **🎤 Voice Commands**: Send a voice message, and it will understand and execute your command
 - **🔔 Notification Forwarding**: Get your PC notifications directly on your phone
 - **⏰ Schedule Tasks**: Set tasks to run at specific times
+- **🔁 Repeat Tasks**: Set up tasks that automatically repeat at specified intervals
 - **📊 System Monitor**: Check your PC's CPU, RAM, and disk usage remotely
 - **📹 Screen Streaming**: Record a video of your screen and send it to your phone
 - **🎙️ Microphone Recording**: Record audio from your PC's microphone and send it to your phone
@@ -41,6 +38,7 @@ Before you begin, make sure you have:
 - An internet connection
 - At least 2GB of free RAM
 - A Telegram account on your phone
+- [Git](https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe) installed in windows
 
 ## 🔧 Installation Guide (Step-by-Step for Beginners)
 
@@ -196,6 +194,8 @@ Here are some things you can ask OmniCtrl to do:
 - "Check the weather for today"
 - "Create a new folder on my desktop called 'Projects'"
 - "Open Word and write a letter to my friend"
+- "Set up a task to check my system info every 5 minutes"
+- "Repeat screenshot every 30 seconds"
 
 ## 📱 Telegram Commands Reference
 
@@ -225,6 +225,18 @@ Once you're connected via Telegram, you can use these special commands:
 | `/schedule HH:MM <task>` | Schedule a task for a specific time |
 | `/schedule list` | List all scheduled tasks |
 | `/schedule clear` | Clear all scheduled tasks |
+| `/repeat` | Set up, list, or manage repeating tasks |
+
+### Using the Repeat Feature
+
+The `/repeat` command allows you to set up tasks that automatically execute at specified intervals:
+
+- `/repeat add <seconds> <command>` - Create a repeating task
+  - Example: `/repeat add 300 sysinfo` (checks system info every 5 minutes)
+  - Example: `/repeat add 30 screenshot` (takes a screenshot every 30 seconds)
+- `/repeat list` - View all active repeating tasks
+- `/repeat stop <id>` - Stop a specific repeating task by its ID
+- `/repeat stop all` - Stop all active repeating tasks
 
 You can also:
 - Send a **voice message** to have it transcribed and executed
@@ -269,6 +281,11 @@ You can also:
 - Make sure you have the necessary dependencies installed
 - Try running `pip install sounddevice soundfile numpy`
 - Check if your microphone/webcam is properly connected
+
+### Repeat Tasks Not Working
+- Check that you're using the correct syntax for the `/repeat` command
+- Verify that the interval is specified in seconds
+- Make sure you're using commands that work with the bot
 
 ## 🔄 Updating OmniCtrl
 
