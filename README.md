@@ -195,7 +195,7 @@ Here are some things you can ask OmniCtrl to do:
 - "Create a new folder on my desktop called 'Projects'"
 - "Open Word and write a letter to my friend"
 - "Set up a task to check my system info every 5 minutes"
-- "Repeat screenshot every 30 seconds"
+- "/Repeat every 30 seconds screenshot"
 
 ## 📱 Telegram Commands Reference
 
@@ -231,9 +231,9 @@ Once you're connected via Telegram, you can use these special commands:
 
 The `/repeat` command allows you to set up tasks that automatically execute at specified intervals:
 
-- `/repeat add <seconds> <command>` - Create a repeating task
-  - Example: `/repeat add 300 sysinfo` (checks system info every 5 minutes)
-  - Example: `/repeat add 30 screenshot` (takes a screenshot every 30 seconds)
+- `/repeat every <seconds> <command>` - Create a repeating task
+  - Example: `/repeat every 5 min sysinfo` (checks system info every 5 minutes)
+  - Example: `/repeat every 30 sec screenshot` (takes a screenshot every 30 seconds)
 - `/repeat list` - View all active repeating tasks
 - `/repeat stop <id>` - Stop a specific repeating task by its ID
 - `/repeat stop all` - Stop all active repeating tasks
