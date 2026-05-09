@@ -3,7 +3,8 @@ Telegram Bot Interface for Remote PC Control
 Handles all communication between user and agent
 Enhanced with: Self-Reconnect, Rate Limiting, Voice Commands, Scheduled Tasks,
                Aliases, File Transfer, System Monitoring, Clipboard Sync, Webcam Capture,
-               Notification Forwarding, Screen Streaming, PC Popup Dialogs, Mic Recording.
+               Notification Forwarding, Screen Streaming, PC Popup Dialogs, Mic Recording,
+               Repeat Tasks (/repeat).
 """
 
 import os
@@ -229,6 +230,20 @@ class TaskRecord:
     error: str = ""
 
 
+# ==========================================
+# FEATURE: Repeat Tasks — Data Model
+# ==========================================
+@dataclass
+class RepeatJob:
+    """Represents a single active repeating task."""
+    repeat_id: str          # Unique ID used as APScheduler job ID (e.g., "repeat_1")
+    command: str            # The raw command string (e.g., "sysinfo", "screenshot", "open notepad")
+    interval_seconds: int   # How often this fires (in seconds)
+    chat_id: int            # Which chat to send results to
+    created_at: str         # ISO timestamp of creation
+    run_count: int = 0      # How many times it has fired so far
+
+
 class TaskHistory:
     def __init__(self, filepath: str):
         self.filepath = filepath
@@ -326,6 +341,19 @@ class TelegramPCInterface:
         # FEATURE: Interactive File Browser State
         # Stores user_id -> {"path": str, "items": [(name, is_dir), ...]}
         self.file_browser_state: Dict[int, Dict[str, Any]] = {}
+
+        # ==========================================
+        # FEATURE: Repeat Tasks — State
+        # ==========================================
+        # Stores active repeat jobs: repeat_id -> RepeatJob
+        self.repeat_jobs: Dict[str, RepeatJob] = {}
+        # Monotonically-increasing counter for generating unique repeat IDs
+        self._repeat_counter = 0
+        # Lock protecting repeat_jobs and _repeat_counter from concurrent access
+        # (APScheduler callbacks run on the asyncio loop; the dict may also be
+        #  read/written from the bot's command handlers on the same loop, so a
+        #  threading.Lock is the safe common denominator.)
+        self._repeat_lock = threading.Lock()
         
         # Build application with INCREASED TIMEOUTS to prevent ReadTimeout on slow networks
         # Default is 5s which is too low for file uploads in some regions
@@ -363,6 +391,9 @@ class TelegramPCInterface:
         self.application.add_handler(CommandHandler("stream", self.cmd_stream))
         self.application.add_handler(CommandHandler("popup", self.cmd_popup))
         self.application.add_handler(CommandHandler("mic", self.cmd_mic))
+
+        # FEATURE: Repeat Tasks
+        self.application.add_handler(CommandHandler("repeat", self.cmd_repeat))
         
         # FEATURE: Voice & File Handlers
         self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -1245,7 +1276,8 @@ class TelegramPCInterface:
         if not await self._check_auth(update): return
         
         if not context.args or context.args[0].lower() == "list":
-            jobs = self.scheduler.get_jobs()
+            # Filter out repeat jobs so they don't appear in the schedule list
+            jobs = [j for j in self.scheduler.get_jobs() if not j.id.startswith("repeat_")]
             if not jobs:
                 await update.message.reply_text("📭 No scheduled tasks.")
             else:
@@ -1255,7 +1287,10 @@ class TelegramPCInterface:
                 await update.message.reply_text(msg, parse_mode="Markdown")
                 
         elif context.args[0].lower() == "clear":
-            self.scheduler.remove_all_jobs()
+            # Only clear one-time schedule jobs, never touch repeat jobs
+            for job in self.scheduler.get_jobs():
+                if not job.id.startswith("repeat_"):
+                    job.remove()
             await update.message.reply_text("🗑️ All scheduled tasks cleared.")
             
         else:
@@ -1290,6 +1325,499 @@ class TelegramPCInterface:
     async def _async_process_queue(self):
         self._process_queue()
 
+    # ==========================================
+    # FEATURE: REPEAT TASKS
+    # ==========================================
+
+    # ---- Unit parsing helpers ----
+
+    # Maps every acceptable unit alias → multiplier in seconds
+    _UNIT_TO_SECONDS: Dict[str, int] = {
+        "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+        "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+        "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    }
+
+    def _format_interval(self, seconds: int) -> str:
+        """Convert raw seconds into a tidy human-readable string."""
+        if seconds < 60:
+            return f"{seconds} sec"
+        elif seconds < 3600:
+            mins = seconds // 60
+            secs = seconds % 60
+            return f"{mins} min {secs} sec" if secs else f"{mins} min"
+        else:
+            hours = seconds // 3600
+            mins = (seconds % 3600) // 60
+            return f"{hours} hr {mins} min" if mins else f"{hours} hr"
+
+    # ---- Action factories ----
+
+    def _make_repeat_action(self, command: str, chat_id: int, repeat_id: str):
+        """
+        Return an async coroutine that APScheduler will call on each tick.
+
+        The coroutine:
+          1. Increments the run_count for bookkeeping.
+          2. Dispatches to the correct native handler OR queues an agent task.
+
+        The repeat_id is captured in the closure so the counter update always
+        targets the right RepeatJob entry.
+        """
+        cmd_lower = command.lower().strip()
+
+        # Map of command keywords → bound async action methods
+        # These are self-contained and never touch the task queue / AI agent.
+        native_dispatch = {
+            "sysinfo":    self._repeat_native_sysinfo,
+            "screenshot": self._repeat_native_screenshot,
+            "mic":        self._repeat_native_mic,
+            "webcam":     self._repeat_native_webcam,
+        }
+
+        if cmd_lower in native_dispatch:
+            native_fn = native_dispatch[cmd_lower]
+
+            async def _native_action():
+                # Increment counter safely
+                with self._repeat_lock:
+                    if repeat_id in self.repeat_jobs:
+                        self.repeat_jobs[repeat_id].run_count += 1
+                await native_fn(chat_id)
+
+            return _native_action
+
+        else:
+            # Treat as a general agent task (custom command)
+            async def _agent_action():
+                with self._repeat_lock:
+                    if repeat_id in self.repeat_jobs:
+                        self.repeat_jobs[repeat_id].run_count += 1
+                await self._repeat_native_agent_task(command, chat_id)
+
+            return _agent_action
+
+    # ---- Native repeat actions (no Update/context needed) ----
+
+    async def _repeat_native_sysinfo(self, chat_id: int):
+        """Collect system metrics and send to chat_id."""
+        try:
+            def bar(percent, length=15):
+                filled = int(percent / 100 * length)
+                return "█" * filled + "░" * (length - filled)
+
+            cpu = psutil.cpu_percent(interval=1)
+            ram = psutil.virtual_memory()
+            disk = psutil.disk_usage('C:/')
+
+            msg = (
+                f"🔁 **[Auto] System Monitor** — {datetime.now().strftime('%H:%M:%S')}\n\n"
+                f"🔥 CPU: {cpu}%\n{bar(cpu)}\n\n"
+                f"💾 RAM: {ram.percent}% ({ram.used//1024//1024}MB / {ram.total//1024//1024}MB)\n{bar(ram.percent)}\n\n"
+                f"💿 Disk C: {disk.percent}% ({disk.free//1024//1024//1024}GB Free)\n{bar(disk.percent)}"
+            )
+            await self._send_message(chat_id, msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"[Repeat] sysinfo failed: {e}")
+
+    async def _repeat_native_screenshot(self, chat_id: int):
+        """Take a screenshot and send it to chat_id."""
+        if not ALLOW_SCREENSHOT_COMMAND:
+            await self._send_message(chat_id, "⚠️ [Repeat] Screenshot command is disabled in config.")
+            return
+        try:
+            path = f"repeat_screenshot_{int(time.time())}.png"
+            self.pc_agent.take_screenshot(path)
+            with open(path, "rb") as photo:
+                await self._send_photo(
+                    chat_id, photo,
+                    caption=f"🔁 Auto Screenshot — {datetime.now().strftime('%H:%M:%S')}"
+                )
+            self.pc_agent.cleanup_screenshot(path)
+        except Exception as e:
+            logger.error(f"[Repeat] screenshot failed: {e}")
+            await self._send_message(chat_id, f"❌ [Repeat] Screenshot failed: {e}")
+
+    async def _repeat_native_mic(self, chat_id: int):
+        """Record microphone audio and send to chat_id."""
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+
+            filename = f"repeat_mic_{int(time.time())}.wav"
+            mydata = sd.rec(int(MIC_RECORD_DURATION * MIC_SAMPLE_RATE), samplerate=MIC_SAMPLE_RATE, channels=1)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, sd.wait)
+            sf.write(filename, mydata, MIC_SAMPLE_RATE)
+
+            with open(filename, "rb") as audio:
+                await self.application.bot.send_audio(
+                    chat_id=chat_id, audio=audio,
+                    caption=f"🔁 Auto Mic Recording — {datetime.now().strftime('%H:%M:%S')} ({MIC_RECORD_DURATION}s)"
+                )
+            if os.path.exists(filename):
+                os.remove(filename)
+        except ImportError:
+            await self._send_message(chat_id, "❌ [Repeat] sounddevice/soundfile not installed.")
+        except Exception as e:
+            logger.error(f"[Repeat] mic failed: {e}")
+            await self._send_message(chat_id, f"❌ [Repeat] Mic failed: {e}")
+
+    async def _repeat_native_webcam(self, chat_id: int):
+        """Capture webcam photo and send to chat_id."""
+        try:
+            cap = cv2.VideoCapture(WEBCAM_INDEX)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                path = f"repeat_webcam_{int(time.time())}.jpg"
+                cv2.imwrite(path, frame)
+                with open(path, "rb") as photo:
+                    await self.application.bot.send_photo(
+                        chat_id=chat_id, photo=photo,
+                        caption=f"🔁 Auto Webcam — {datetime.now().strftime('%H:%M:%S')}"
+                    )
+                os.remove(path)
+            else:
+                await self._send_message(chat_id, "❌ [Repeat] Webcam could not be accessed.")
+        except Exception as e:
+            logger.error(f"[Repeat] webcam failed: {e}")
+            await self._send_message(chat_id, f"❌ [Repeat] Webcam failed: {e}")
+
+    async def _repeat_native_agent_task(self, command: str, chat_id: int):
+        """
+        Queue a general agent task for repeat execution.
+
+        If the bot is currently busy executing another task the repeat cycle is
+        silently skipped (with a brief Telegram notification) so that repeating
+        tasks never pile up in the queue or collide with one-time tasks or other
+        scheduled jobs.
+        """
+        with self.lock:
+            if self.is_busy:
+                logger.info(f"[Repeat] Skipping '{command}' — bot is busy.")
+                await self._send_message(
+                    chat_id,
+                    f"⏭️ **Repeat Skipped:** `{command[:60]}`\n"
+                    f"Bot is busy with another task. Will retry next cycle.",
+                    parse_mode="Markdown"
+                )
+                return
+
+        # Not busy — enqueue and process immediately (bypasses confirmation dialog
+        # to keep repeating tasks non-interactive)
+        self.task_queue.put((command, chat_id))
+        self._process_queue()
+
+    # ---- Scheduler job persistence (reconnect safety) ----
+
+    def _restore_repeat_jobs(self):
+        """
+        Re-register all in-memory RepeatJobs with APScheduler after a restart
+        or reconnect cycle.  Called from _bootstrap whenever the scheduler is
+        (re)started so repeating tasks survive network interruptions.
+        """
+        with self._repeat_lock:
+            jobs_snapshot = dict(self.repeat_jobs)
+
+        if not jobs_snapshot:
+            return
+
+        restored = 0
+        for repeat_id, rj in jobs_snapshot.items():
+            try:
+                action_fn = self._make_repeat_action(rj.command, rj.chat_id, repeat_id)
+                self.scheduler.add_job(
+                    action_fn,
+                    trigger='interval',
+                    seconds=rj.interval_seconds,
+                    id=repeat_id,
+                    replace_existing=True   # Safe to call even if the job already exists
+                )
+                restored += 1
+            except Exception as e:
+                logger.error(f"[Repeat] Failed to restore job {repeat_id}: {e}")
+
+        if restored:
+            logger.info(f"[Repeat] Restored {restored} repeat job(s) after reconnect.")
+
+    # ---- Command handler: /repeat ----
+
+    async def cmd_repeat(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Entry point for all /repeat sub-commands.
+
+        Syntax summary
+        ──────────────
+        /repeat every <N> <unit> <command>   — start repeating
+        /repeat list                          — show all active repeats
+        /repeat stop <command|repeat_id>      — stop a repeating task
+        /repeat                               — show usage help
+        """
+        if not await self._check_auth(update):
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "🔁 **Repeat Tasks — Usage**\n\n"
+                "`/repeat every <N> <unit> <command>`\n"
+                "`/repeat list`\n"
+                "`/repeat stop <command>`\n\n"
+                "**Units:** `sec`, `min`, `hour`\n\n"
+                "**Examples:**\n"
+                "• `/repeat every 5 min sysinfo`\n"
+                "• `/repeat every 30 sec screenshot`\n"
+                "• `/repeat every 1 hour mic`\n"
+                "• `/repeat every 10 min open notepad`\n"
+                "• `/repeat stop sysinfo`\n"
+                "• `/repeat list`",
+                parse_mode="Markdown"
+            )
+            return
+
+        sub = context.args[0].lower()
+
+        if sub == "list":
+            await self._repeat_cmd_list(update)
+
+        elif sub == "stop":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "❌ Usage: `/repeat stop <command>`\nExample: `/repeat stop sysinfo`",
+                    parse_mode="Markdown"
+                )
+                return
+            target = " ".join(context.args[1:]).strip()
+            await self._repeat_cmd_stop(update, target)
+
+        elif sub == "every":
+            # Must have at minimum: every <N> <unit> <command>
+            # That means context.args = ["every", N, unit, cmd...]
+            if len(context.args) < 4:
+                await update.message.reply_text(
+                    "❌ Usage: `/repeat every <N> <unit> <command>`\n"
+                    "Example: `/repeat every 5 min sysinfo`",
+                    parse_mode="Markdown"
+                )
+                return
+            try:
+                n = int(context.args[1])
+                if n <= 0:
+                    raise ValueError("N must be positive")
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ `<N>` must be a positive whole number.\n"
+                    "Example: `/repeat every 5 min sysinfo`",
+                    parse_mode="Markdown"
+                )
+                return
+
+            unit = context.args[2].lower()
+            command = " ".join(context.args[3:]).strip()
+            await self._repeat_cmd_add(update, n, unit, command)
+
+        else:
+            await update.message.reply_text(
+                "❌ Unknown sub-command. Use `/repeat` for usage help.",
+                parse_mode="Markdown"
+            )
+
+    async def _repeat_cmd_add(self, update: Update, n: int, unit: str, command: str):
+        """Validate and register a new repeating task."""
+        chat_id = update.effective_chat.id
+
+        # --- Validate unit ---
+        if unit not in self._UNIT_TO_SECONDS:
+            await update.message.reply_text(
+                f"❌ Unknown unit `{unit}`.\n"
+                f"Accepted: `sec`, `min`, `hour` (and common variants like `seconds`, `minutes`, `hours`).",
+                parse_mode="Markdown"
+            )
+            return
+
+        interval_seconds = n * self._UNIT_TO_SECONDS[unit]
+
+        # --- Safety floor: prevent sub-10-second spam ---
+        if interval_seconds < 10:
+            await update.message.reply_text(
+                "❌ Minimum repeat interval is **10 seconds** to prevent spam.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # --- Sanity ceiling: prevent accidentally huge intervals ---
+        MAX_INTERVAL = 7 * 24 * 3600  # 1 week
+        if interval_seconds > MAX_INTERVAL:
+            await update.message.reply_text(
+                "❌ Maximum repeat interval is **7 days**. "
+                "Consider using `/schedule` for one-time tasks far in the future.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # --- Duplicate check (same command + same chat) ---
+        with self._repeat_lock:
+            for rj in self.repeat_jobs.values():
+                if rj.command.lower() == command.lower() and rj.chat_id == chat_id:
+                    await update.message.reply_text(
+                        f"⚠️ `{command}` is already repeating every "
+                        f"**{self._format_interval(rj.interval_seconds)}**.\n"
+                        f"Stop it first: `/repeat stop {command}`",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+        # --- Allocate a unique ID before registering with APScheduler ---
+        with self._repeat_lock:
+            self._repeat_counter += 1
+            repeat_id = f"repeat_{self._repeat_counter}"
+
+        # --- Build the closure-bound action ---
+        action_fn = self._make_repeat_action(command, chat_id, repeat_id)
+
+        # --- Register with APScheduler (interval trigger, isolated from /schedule jobs) ---
+        try:
+            self.scheduler.add_job(
+                action_fn,
+                trigger='interval',
+                seconds=interval_seconds,
+                id=repeat_id,
+                replace_existing=True,  # Should never conflict, but defensive
+            )
+        except Exception as e:
+            logger.error(f"[Repeat] Failed to add APScheduler job: {e}")
+            await update.message.reply_text(f"❌ Failed to create repeat job: {e}")
+            return
+
+        # --- Persist in our tracking dict ---
+        repeat_job = RepeatJob(
+            repeat_id=repeat_id,
+            command=command,
+            interval_seconds=interval_seconds,
+            chat_id=chat_id,
+            created_at=datetime.now().isoformat(),
+        )
+        with self._repeat_lock:
+            self.repeat_jobs[repeat_id] = repeat_job
+
+        interval_str = self._format_interval(interval_seconds)
+        logger.info(f"[Repeat] Started: {repeat_id} — '{command}' every {interval_str} for chat {chat_id}")
+
+        await update.message.reply_text(
+            f"✅ **Repeat Started!**\n\n"
+            f"🔁 Command: `{command}`\n"
+            f"⏱️ Every: **{interval_str}**\n"
+            f"🆔 ID: `{repeat_id}`\n\n"
+            f"_First run in {interval_str}._\n"
+            f"Stop anytime: `/repeat stop {command}`",
+            parse_mode="Markdown"
+        )
+
+    async def _repeat_cmd_list(self, update: Update):
+        """Show all currently active repeating tasks for this chat."""
+        chat_id = update.effective_chat.id
+
+        with self._repeat_lock:
+            # Show only jobs that belong to this chat
+            active = {rid: rj for rid, rj in self.repeat_jobs.items() if rj.chat_id == chat_id}
+
+        if not active:
+            await update.message.reply_text(
+                "📭 **No active repeat tasks.**\n\n"
+                "Start one with:\n`/repeat every <N> <unit> <command>`",
+                parse_mode="Markdown"
+            )
+            return
+
+        msg = f"🔁 **Active Repeat Tasks** ({len(active)}):\n\n"
+
+        for repeat_id, rj in active.items():
+            # Retrieve next scheduled run time from APScheduler
+            try:
+                job = self.scheduler.get_job(repeat_id)
+                if job and job.next_run_time:
+                    next_run = job.next_run_time.strftime('%H:%M:%S')
+                else:
+                    next_run = "—"
+            except Exception:
+                next_run = "—"
+
+            interval_str = self._format_interval(rj.interval_seconds)
+            created = datetime.fromisoformat(rj.created_at).strftime('%d %b %H:%M')
+
+            msg += (
+                f"▸ `{rj.command}`\n"
+                f"  ⏱️ Every {interval_str}  |  🕐 Next: {next_run}\n"
+                f"  🔢 Ran {rj.run_count}×  |  📅 Since {created}\n"
+                f"  🆔 `{repeat_id}`  |  `/repeat stop {rj.command}`\n\n"
+            )
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _repeat_cmd_stop(self, update: Update, target: str):
+        """
+        Stop a repeating task.  `target` can be:
+          - The command string (e.g., "sysinfo", "open notepad")
+          - The repeat_id (e.g., "repeat_3")
+        Matching is case-insensitive.
+        """
+        chat_id = update.effective_chat.id
+        target_lower = target.lower()
+
+        found_id: Optional[str] = None
+        found_job: Optional[RepeatJob] = None
+
+        with self._repeat_lock:
+            for rid, rj in self.repeat_jobs.items():
+                # Match by repeat_id OR by command (for this chat only)
+                if rj.chat_id == chat_id and (
+                    rid.lower() == target_lower or
+                    rj.command.lower() == target_lower
+                ):
+                    found_id = rid
+                    found_job = rj
+                    break
+
+        if found_id is None:
+            # Provide a helpful hint with the current list
+            with self._repeat_lock:
+                active_cmds = [rj.command for rj in self.repeat_jobs.values() if rj.chat_id == chat_id]
+
+            hint = ""
+            if active_cmds:
+                hint = "\n\n**Active repeats:**\n" + "\n".join(f"• `{c}`" for c in active_cmds)
+                hint += "\n\nUse `/repeat list` for details."
+            else:
+                hint = "\n\nNo active repeat tasks. Use `/repeat list` to check."
+
+            await update.message.reply_text(
+                f"❌ No repeat task found for `{target}`." + hint,
+                parse_mode="Markdown"
+            )
+            return
+
+        # --- Remove from APScheduler ---
+        try:
+            self.scheduler.remove_job(found_id)
+        except Exception as e:
+            # Job may have already expired; not fatal
+            logger.warning(f"[Repeat] Could not remove APScheduler job {found_id}: {e}")
+
+        # --- Remove from our tracking dict ---
+        with self._repeat_lock:
+            self.repeat_jobs.pop(found_id, None)
+
+        interval_str = self._format_interval(found_job.interval_seconds)
+        logger.info(f"[Repeat] Stopped: {found_id} — '{found_job.command}' (ran {found_job.run_count}×)")
+
+        await update.message.reply_text(
+            f"⛔ **Repeat Stopped**\n\n"
+            f"🔁 Command: `{found_job.command}`\n"
+            f"⏱️ Was running every **{interval_str}**\n"
+            f"🔢 Total runs: {found_job.run_count}×",
+            parse_mode="Markdown"
+        )
+
     # ============ ORIGINAL COMMAND HANDLERS ============
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1301,7 +1829,8 @@ class TelegramPCInterface:
             "💬 Text/Voice → Execute task\n"
             "📂 Send File → Save to Downloads\n"
             "📂 `/getfile` → Browse & download files\n"
-            "⏰ `/schedule HH:MM <task>`\n"
+            "⏰ `/schedule HH:MM <task>` → One-time task\n"
+            "🔁 `/repeat every <N> <unit> <cmd>` → Repeating task\n"
             "🔗 `/alias add <word> <cmd>`\n"
             "📊 `/sysinfo` | 📋 `/clip` | 📸 `/webcam`\n"
             "🖥️ `/screenshot` | 🎥 `/stream`\n"
@@ -1334,7 +1863,15 @@ class TelegramPCInterface:
 • `/clip set <text>` - Write to clipboard
 • `/webcam` - Take photo
 • `/alias add n open notepad` - Create shortcut
-• `/schedule 14:30 open chrome` - Schedule task
+• `/schedule 14:30 open chrome` - One-time task
+
+**Repeat Tasks:**
+• `/repeat every 5 min sysinfo` - Repeat every 5 min
+• `/repeat every 30 sec screenshot` - Repeat every 30 sec
+• `/repeat every 1 hour mic` - Repeat every hour
+• `/repeat every 10 min open notepad` - Any command
+• `/repeat list` - Show active repeats
+• `/repeat stop sysinfo` - Stop a repeat
 
 **Media:**
 • `/stream` - 10s screen recording video
@@ -1627,6 +2164,9 @@ class TelegramPCInterface:
         await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         if not self.scheduler.running:
             self.scheduler.start()
+            # Re-register any in-memory repeat jobs after a reconnect so they
+            # survive network interruptions without the user needing to restart them.
+            self._restore_repeat_jobs()
 
     async def _shutdown_app(self):
         try:
@@ -1648,6 +2188,7 @@ class TelegramPCInterface:
         print(f"🛡️ Autonomous Reconnect: ENABLED")
         print(f"🚦 Rate Limiting: ENABLED")
         print(f"⏰ Task Scheduler: ENABLED")
+        print(f"🔁 Repeat Tasks: ENABLED")
         print(f"📂 Interactive File Browser: ENABLED")
         print(f"⏱️ Network Timeouts: Increased (60s) for slow networks")
         if ENABLE_NOTIFICATION_FORWARDING and HAS_WIN32GUI:
