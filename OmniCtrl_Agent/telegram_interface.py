@@ -51,6 +51,7 @@ from google.genai import types as genai_types
 from OmniCtrl_Agent.config import *
 from Core.core_agent import PCControlAgent
 from API import *
+from key_rotation import gemini_keys  
 
 # Fallback for timeout config in case it's missing before config.py is updated
 try:
@@ -332,7 +333,6 @@ class TelegramPCInterface:
         self.rate_limiter = RateLimiter()
         self.alias_manager = AliasManager("aliases.json")
         self.scheduler = AsyncIOScheduler()
-        self.genai_stt_client = genai.Client(api_key=GEMINI_API_KEY)
         
         # FEATURE: Notification Forwarding Init
         # Delaying listener start to _post_init so the event loop is ready
@@ -394,6 +394,8 @@ class TelegramPCInterface:
 
         # FEATURE: Repeat Tasks
         self.application.add_handler(CommandHandler("repeat", self.cmd_repeat))
+        # FEATURE: Gemini Key Status
+        self.application.add_handler(CommandHandler("keys", self.cmd_keys))
         
         # FEATURE: Voice & File Handlers
         self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
@@ -415,6 +417,16 @@ class TelegramPCInterface:
             logger.debug("Silenced a network timeout.")
         else:
             logger.error(f"Unhandled Exception: {type(error).__name__} - {error}")
+
+             # ============ FEATURE: GEMINI KEY STATUS ============
+
+    async def cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Shows the health of every configured Gemini API key."""
+        if not await self._check_auth(update): return
+        try:
+            await update.message.reply_text(gemini_keys.status_report(), parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Could not read key status: {e}")
 
     # ============ AUTHORIZATION & RATE LIMITING ============
     
@@ -584,12 +596,18 @@ class TelegramPCInterface:
             file = await voice.get_file()
             file_bytes = await file.download_as_bytearray()
             
-            response = self.genai_stt_client.models.generate_content(
-                model="gemini-2.0-flash", 
-                contents=[
-                    genai_types.Part.from_bytes(data=bytes(file_bytes), mime_type="audio/ogg"),
-                    "Transcribe this audio accurately into plain text. Only output the spoken words, nothing else."
-                ]
+            # Transcribe via the auto-rotating key pool (runs in a thread so
+            # key-switch retries / cooldown waits never freeze the bot)
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: gemini_keys.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[
+                        genai_types.Part.from_bytes(data=bytes(file_bytes), mime_type="audio/ogg"),
+                        "Transcribe this audio accurately into plain text. Only output the spoken words, nothing else."
+                    ]
+                )
             )
             
             transcribed_text = response.text.strip()

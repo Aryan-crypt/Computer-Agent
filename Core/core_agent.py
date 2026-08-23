@@ -31,6 +31,7 @@ import requests
 
 from DataBase.shortcuts import WINDOWS_SHORTCUTS
 from API import *
+from key_rotation import gemini_keys
 
 # Import timing and limit configurations
 from OmniCtrl_Agent.config import (
@@ -52,8 +53,6 @@ OPENROUTER_API_KEY = OpenRouter_API_KEY
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 GEMMA4_MODEL = "google/gemma-4-31b-it:free"
 
-# Configure Gemini
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 @dataclass
 class Step:
@@ -166,7 +165,7 @@ class CommanderAgent:
                     )
                 )
 
-            response = gemini_client.models.generate_content(
+            response = gemini_keys.generate_content(
                 model=self.model,
                 contents=contents
             )
@@ -222,7 +221,7 @@ class CommanderAgent:
                 )
             )
 
-            response = gemini_client.models.generate_content(
+            response = gemini_keys.generate_content(
                 model=self.model,
                 contents=contents
             )
@@ -264,7 +263,7 @@ class CommanderAgent:
             img_byte_arr = BytesIO()
             screenshot.save(img_byte_arr, format='PNG')
 
-            response = gemini_client.models.generate_content(
+            response = gemini_keys.generate_content(
                 model=self.model,
                 contents=[
                     prompt,
@@ -369,7 +368,7 @@ class CoordinateExtractor:
                 "Return only the coordinates as [ymin, xmin, ymax, xmax] "
                 "using a 0-1000 coordinate system. No explanation, just the numbers."
             )
-            response = gemini_client.models.generate_content(
+            response = gemini_keys.generate_content(
                 model="gemini-3-flash-preview",
                 contents=[
                     prompt,
@@ -443,7 +442,7 @@ class ContentProcessor:
                     mime_type="image/png"
                 )
             )
-        response = gemini_client.models.generate_content(
+        response = gemini_keys.generate_content(
             model="gemini-3-flash-preview",
             contents=contents
         )

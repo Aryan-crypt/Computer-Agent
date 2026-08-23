@@ -17,7 +17,6 @@ from OmniCtrl_Agent.telegram_interface import TelegramPCInterface
 
 def main():
     """Entry point for the Advanced PC Control Agent"""
-    
     # Set up clean, readable logging for OUR application only
     logging.basicConfig(
         level=logging.INFO,
